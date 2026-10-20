@@ -24,6 +24,10 @@ from config_manager import BroadlinkConfig, BroadlinkConfigManager
 _LOG = logging.getLogger(__name__)
 
 LEARNING_TIMEOUT = timedelta(seconds=30)
+# BL-2: python-broadlink waits up to 10 s per request by default, resending every 1 s.
+# A shorter timeout keeps an unreachable device from stalling commands for that long.
+DEVICE_TIMEOUT = 4
+DISCOVERY_TIMEOUT = 5
 
 
 @dataclass
@@ -57,6 +61,10 @@ class Broadlink(ExternalClientDevice):
         self._device_config: BroadlinkConfig
         self._config_manager: BroadlinkConfigManager  # Type narrowing from base class
         self._state = BroadlinkDeviceState()
+        # BL-2: one connect at a time (ucapi_framework's connect() has no lock), and one
+        # python-broadlink call at a time (the library's own device lock never engages).
+        self._connect_lock = asyncio.Lock()
+        self._io_lock = asyncio.Lock()
 
     @property
     def identifier(self) -> str:
@@ -88,6 +96,34 @@ class Broadlink(ExternalClientDevice):
         """Return the shared device state for all entities to read from."""
         return self._state
 
+    async def connect(self) -> bool:
+        """Connect to the device, one attempt at a time (BL-2).
+
+        The wake reconnect, a button press and the subscribe handler can all ask for a
+        connection at once. Without the lock their create_client()/connect_client()
+        calls interleave; with it, later callers wait for the attempt in progress.
+        """
+        async with self._connect_lock:
+            if self.is_connected:
+                return True
+            return await super().connect()
+
+    async def _run_io(self, func, *args, **kwargs):
+        """Run a blocking python-broadlink call off the event loop (BL-2).
+
+        Calls are serialized per device: python-broadlink's own lock never engages
+        (``with self.lock and socket...`` only enters the socket).
+        """
+        async with self._io_lock:
+            return await asyncio.to_thread(func, *args, **kwargs)
+
+    def _discover_by_mac(self) -> broadlink.Device | None:
+        """Find this device on the network by MAC (blocking; run via _run_io)."""
+        for device in broadlink.xdiscover(timeout=DISCOVERY_TIMEOUT):
+            if hasattr(device, "mac") and device.mac.hex() == self.identifier:
+                return device
+        return None
+
     async def create_client(self) -> broadlink.Device:
         """Create and discover the Broadlink client."""
         _LOG.debug(
@@ -98,8 +134,13 @@ class Broadlink(ExternalClientDevice):
 
         # Try connecting to stored IP address first
         try:
-            device = broadlink.hello(ip_address=self._device_config.address, timeout=5)
+            device = await self._run_io(
+                broadlink.hello,
+                ip_address=self._device_config.address,
+                timeout=DISCOVERY_TIMEOUT,
+            )
             if device:
+                device.timeout = DEVICE_TIMEOUT
                 return device
         except Exception as ip_err:
             _LOG.warning(
@@ -110,25 +151,26 @@ class Broadlink(ExternalClientDevice):
             )
 
         # Fallback: try to discover device by MAC using xdiscover to exit early
-        for device in broadlink.xdiscover(timeout=5):
-            if hasattr(device, "mac") and device.mac.hex() == self.identifier:
-                _LOG.debug(
-                    "[%s] Found device with matching MAC: %s",
-                    self.log_id,
-                    device,
-                )
-                # Update IP address if it changed
-                if hasattr(device, "host") and device.host:
-                    new_ip = device.host[0]
-                    if new_ip != self._device_config.address:
-                        _LOG.info(
-                            "[%s] Device discovered at new IP address %s (was %s), updating config",
-                            self.log_id,
-                            new_ip,
-                            self._device_config.address,
-                        )
-                        self.update_config(address=new_ip)
-                return device
+        device = await self._run_io(self._discover_by_mac)
+        if device is not None:
+            _LOG.debug(
+                "[%s] Found device with matching MAC: %s",
+                self.log_id,
+                device,
+            )
+            # Update IP address if it changed
+            if hasattr(device, "host") and device.host:
+                new_ip = device.host[0]
+                if new_ip != self._device_config.address:
+                    _LOG.info(
+                        "[%s] Device discovered at new IP address %s (was %s), updating config",
+                        self.log_id,
+                        new_ip,
+                        self._device_config.address,
+                    )
+                    self.update_config(address=new_ip)
+            device.timeout = DEVICE_TIMEOUT
+            return device
 
         raise Exception(f"Device with MAC {self.identifier} not found on network")
 
@@ -138,7 +180,7 @@ class Broadlink(ExternalClientDevice):
             raise Exception("Client not created")
 
         _LOG.debug("[%s] Authenticating with Broadlink device", self.log_id)
-        self._client.auth()  # type: ignore[attr-defined]
+        await self._run_io(self._client.auth)  # type: ignore[attr-defined]
 
         # Verify we connected to the correct device by checking MAC address
         if hasattr(self._client, "mac") and self._client.mac:
@@ -201,10 +243,19 @@ class Broadlink(ExternalClientDevice):
         self, predefined_code: str | None = None, code: str | bytes | None = None
     ) -> StatusCodes:
         """Send a command to the Broadlink."""
-        # Check if connected - don't force connection here
         if not self.is_connected or not self._client:
-            _LOG.warning("[%s] Cannot send command: device not connected", self.log_id)
-            return StatusCodes.SERVICE_UNAVAILABLE
+            # BL-2: reconnect on demand instead of dropping the press. connect() is
+            # locked, so a reconnect already in progress (e.g. right after a wake) is
+            # awaited rather than duplicated.
+            _LOG.info(
+                "[%s] Device not connected, reconnecting before sending", self.log_id
+            )
+            await self.connect()
+            if not self.is_connected or not self._client:
+                _LOG.warning(
+                    "[%s] Cannot send command: device not connected", self.log_id
+                )
+                return StatusCodes.SERVICE_UNAVAILABLE
 
         # Clear media title/artist
         self._state.media_title = ""
@@ -223,7 +274,7 @@ class Broadlink(ExternalClientDevice):
             try:
                 decode = b64decode(code_data)
                 if self._client:
-                    self._client.send_data(decode)  # type: ignore[attr-defined]
+                    await self._run_io(self._client.send_data, decode)  # type: ignore[attr-defined]
                     self.emit(device, command, "Sent")
                     return StatusCodes.OK
                 return StatusCodes.SERVER_ERROR
@@ -241,7 +292,7 @@ class Broadlink(ExternalClientDevice):
                 try:
                     if self._client:
                         decode = b64decode(code_data)
-                        self._client.send_data(decode)  # type: ignore[attr-defined]
+                        await self._run_io(self._client.send_data, decode)  # type: ignore[attr-defined]
                         self.emit(device, command, "Sent (after reconnect)")
                         return StatusCodes.OK
                 except Exception as retry_err:
@@ -252,6 +303,9 @@ class Broadlink(ExternalClientDevice):
                     )
                     self.emit(device, command, "Error")
                     return StatusCodes.SERVER_ERROR
+                # BL-4: the reconnect failed, so nothing was sent.
+                self.emit(device, command, "Error")
+                return StatusCodes.SERVICE_UNAVAILABLE
             except Exception as err:  # pylint: disable=broad-exception-caught
                 _LOG.error(
                     "[%s] Error sending command %s: %s",
@@ -269,7 +323,7 @@ class Broadlink(ExternalClientDevice):
                 return StatusCodes.SERVICE_UNAVAILABLE
 
             try:
-                self._client.send_data(code)  # type: ignore[attr-defined]
+                await self._run_io(self._client.send_data, code)  # type: ignore[attr-defined]
                 return StatusCodes.OK
             except (BroadlinkException, OSError) as err:
                 _LOG.warning(
@@ -283,7 +337,7 @@ class Broadlink(ExternalClientDevice):
 
                 try:
                     if self._client:
-                        self._client.send_data(code)  # type: ignore[attr-defined]
+                        await self._run_io(self._client.send_data, code)  # type: ignore[attr-defined]
                         return StatusCodes.OK
                 except Exception as retry_err:
                     _LOG.error(
@@ -292,6 +346,8 @@ class Broadlink(ExternalClientDevice):
                         retry_err,
                     )
                     return StatusCodes.SERVER_ERROR
+                # BL-4: the reconnect failed, so nothing was sent.
+                return StatusCodes.SERVICE_UNAVAILABLE
             except Exception as err:  # pylint: disable=broad-exception-caught
                 _LOG.error(
                     "[%s] Error sending custom command: %s",
@@ -311,7 +367,7 @@ class Broadlink(ExternalClientDevice):
             return StatusCodes.SERVICE_UNAVAILABLE
 
         try:
-            self._client.enter_learning()  # type: ignore[attr-defined]
+            await self._run_io(self._client.enter_learning)  # type: ignore[attr-defined]
         except (BroadlinkException, OSError) as err:
             _LOG.error("[%s] Error learning command %s: %s", self.log_id, input, err)
             return StatusCodes.SERVER_ERROR
@@ -321,7 +377,7 @@ class Broadlink(ExternalClientDevice):
             while (datetime.now(tz=UTC) - start_time) < LEARNING_TIMEOUT:
                 await asyncio.sleep(1)
                 try:
-                    code = self._client.check_data()  # type: ignore[attr-defined]
+                    code = await self._run_io(self._client.check_data)  # type: ignore[attr-defined]
                     if not code:
                         continue
                 except (ReadError, StorageError):
@@ -370,7 +426,7 @@ class Broadlink(ExternalClientDevice):
             await asyncio.sleep(2)
 
             try:
-                self._client.sweep_frequency()  # type: ignore[attr-defined]
+                await self._run_io(self._client.sweep_frequency)  # type: ignore[attr-defined]
 
             except (BroadlinkException, OSError) as err:
                 _LOG.debug("Failed to sweep frequency: %s", err)
@@ -380,11 +436,13 @@ class Broadlink(ExternalClientDevice):
                 start_time = datetime.now(tz=UTC)
                 while (datetime.now(tz=UTC) - start_time) < LEARNING_TIMEOUT:
                     await asyncio.sleep(2)
-                    is_found, frequency = self._client.check_frequency()  # type: ignore[attr-defined]
+                    is_found, frequency = await self._run_io(
+                        self._client.check_frequency  # type: ignore[attr-defined]
+                    )
                     if is_found:
                         _LOG.debug("Radio frequency detected: %s MHz", frequency)
                         self.emit(device, command, f"Found frequency: {frequency} MHz")
-                        self._client.cancel_sweep_frequency()  # type: ignore[attr-defined]
+                        await self._run_io(self._client.cancel_sweep_frequency)  # type: ignore[attr-defined]
                         break
                     else:
                         _LOG.debug("Detecting: %s MHz", frequency)
@@ -392,7 +450,7 @@ class Broadlink(ExternalClientDevice):
                             device, command, f"Detecting frequency: {frequency} MHz"
                         )
                 else:
-                    self._client.cancel_sweep_frequency()  # type: ignore[attr-defined]
+                    await self._run_io(self._client.cancel_sweep_frequency)  # type: ignore[attr-defined]
                     self.emit(device, command, "Failed to find frequency")
                     return StatusCodes.TIMEOUT
 
@@ -405,7 +463,10 @@ class Broadlink(ExternalClientDevice):
         self.emit(device, command, f"Single press the button: ({frequency} MHz)")
 
         try:
-            self._client.find_rf_packet(frequency=float(frequency))  # type: ignore[attr-defined]
+            await self._run_io(
+                self._client.find_rf_packet,  # type: ignore[attr-defined]
+                frequency=float(frequency),
+            )
 
         except (BroadlinkException, OSError) as err:
             _LOG.debug("Failed to enter learning mode: %s", err)
@@ -416,7 +477,7 @@ class Broadlink(ExternalClientDevice):
             while (datetime.now(tz=UTC) - start_time) < LEARNING_TIMEOUT:
                 await asyncio.sleep(2)
                 try:
-                    code = self._client.check_data()  # type: ignore[attr-defined]
+                    code = await self._run_io(self._client.check_data)  # type: ignore[attr-defined]
                 except (ReadError, StorageError) as err:
                     _LOG.debug("No RF code received yet, retrying: %s", err)
                     self.emit(

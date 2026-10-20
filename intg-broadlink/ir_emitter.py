@@ -69,14 +69,7 @@ class BroadlinkIREmitter(IREmitterEntity):
 
     def get_int_param(self, param: str, params: dict[str, Any], default: int):
         """Get parameter in integer format."""
-        try:
-            value = params.get(param, default)
-        except AttributeError:
-            return default
-
-        if isinstance(value, str) and len(value) > 0:
-            return int(float(value))
-        return default
+        return self._get_int_param(param, params, default)
 
     async def command_handler(
         self,
@@ -96,23 +89,19 @@ class BroadlinkIREmitter(IREmitterEntity):
         :param options: optional command options
         :return: status code of the command request
         """
-        repeat = 1
         _LOG.info("Got %s command request: %s %s", self.id, cmd_id, params)
 
         if self._device is None:
             _LOG.warning("No Broadlink instance for entity: %s", self.id)
             return StatusCodes.SERVICE_UNAVAILABLE
 
-        if params:
-            repeat = self.get_int_param("repeat", params, 1)
-
         try:
-            for _i in range(0, repeat):
-                await self.handle_command(cmd_id, params)
+            # BL-4: report the device's result instead of always OK. BL-5: repeat is
+            # applied once, in handle_command (it used to be applied here as well).
+            return await self.handle_command(cmd_id, params)
         except Exception as ex:  # pylint: disable=broad-except
             _LOG.error("Error executing command %s: %s", cmd_id, ex)
             return StatusCodes.BAD_REQUEST
-        return StatusCodes.OK
 
     async def handle_command(
         self, cmd_id: str, params: dict[str, Any] | None = None
@@ -121,16 +110,13 @@ class BroadlinkIREmitter(IREmitterEntity):
         if params is None:
             return StatusCodes.BAD_REQUEST
 
-        if params:
-            repeat = self._get_int_param("repeat", params, 1)
-        else:
-            repeat = 1
+        repeat = max(1, self._get_int_param("repeat", params, 1))
 
         if cmd_id == "send_ir":
             code_param = params.get("code") if params else None
             if code_param:
                 code = await self._convert_ir_code(code_param)
-                return await self._device.send_command(code=code)
+                return await self._send_repeated(code, repeat)
             return StatusCodes.BAD_REQUEST
 
         if cmd_id == "stop_ir":
@@ -155,7 +141,15 @@ class BroadlinkIREmitter(IREmitterEntity):
             return StatusCodes.BAD_REQUEST
 
         # send "raw" commands as is to the receiver
-        return await self._device.send_command(code=cmd_id)
+        return await self._send_repeated(cmd_id, repeat)
+
+    async def _send_repeated(self, code: Any, repeat: int) -> StatusCodes:
+        """Send ``code`` ``repeat`` times, stopping at the first failure (BL-4/BL-5)."""
+        for _ in range(repeat):
+            result = await self._device.send_command(code=code)
+            if result != StatusCodes.OK:
+                return result
+        return StatusCodes.OK
 
     async def _convert_ir_code(self, code: Any) -> bytes:
         """Convert IR input, delegating Remote-supported formats when possible."""
@@ -206,6 +200,15 @@ class BroadlinkIREmitter(IREmitterEntity):
         except AttributeError:
             return default
 
+        # BL-5: accept integers as well as strings (only strings used to be parsed,
+        # so an integer repeat value was silently ignored).
+        if isinstance(value, bool):
+            return default
+        if isinstance(value, int):
+            return value
         if isinstance(value, str) and len(value) > 0:
-            return int(float(value))
+            try:
+                return int(float(value))
+            except ValueError:
+                return default
         return default

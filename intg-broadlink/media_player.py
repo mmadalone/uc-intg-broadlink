@@ -90,7 +90,8 @@ class BroadlinkMediaPlayer(MediaPlayerEntity):
         try:
             match cmd_id:
                 case media_player.Commands.SELECT_SOURCE:
-                    await self._device.send_command(
+                    # BL-4: report the device's result instead of always OK.
+                    return await self._device.send_command(
                         predefined_code=params.get("source") if params else None
                     )
                 case media_player.Commands.SELECT_SOUND_MODE:

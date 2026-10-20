@@ -9,13 +9,14 @@ import asyncio
 import logging
 import os
 
+from broadlink_driver import BroadlinkDriver
 from discover import BroadlinkDiscovery
 from ir_emitter import BroadlinkIREmitter
 from media_player import BroadlinkMediaPlayer
 from remote import BroadlinkRemote
 from rm import Broadlink
 from setup import BroadlinkSetupFlow
-from ucapi_framework import BaseIntegrationDriver, get_config_path
+from ucapi_framework import get_config_path
 
 from config_manager import BroadlinkConfig, BroadlinkConfigManager
 
@@ -30,8 +31,9 @@ async def main():
     logging.getLogger("config").setLevel(level)
     logging.getLogger("discover").setLevel(level)
     logging.getLogger("setup").setLevel(level)
+    logging.getLogger("broadlink_driver").setLevel(level)
 
-    driver = BaseIntegrationDriver(
+    driver = BroadlinkDriver(
         device_class=Broadlink,
         entity_classes=[
             BroadlinkMediaPlayer,
@@ -49,6 +51,9 @@ async def main():
     )
 
     await driver.register_all_device_instances()
+    # BL-1: a device whose first connect failed (e.g. the driver started before the
+    # remote's Wi-Fi was up) keeps retrying instead of waiting for the next wake.
+    driver.connect_all_with_retry()
 
     discovery = BroadlinkDiscovery(timeout=1)
     setup_handler = BroadlinkSetupFlow.create_handler(driver, discovery=discovery)

@@ -1,6 +1,6 @@
 {
   "driver_id": "broadlink_driver",
-  "version": "1.3.0",
+  "version": "1.3.0-madalone.1",
   "min_core_api": "0.20.0",
   "name": { "en": "Broadlink" },
   "icon": "uc:wave-pulse",
@@ -10,11 +10,11 @@
     "fr": "Contrôlez vos appareils Broadlink avec Remote Two/3."
   },
   "developer": {
-    "name": "Jack Powell",
-    "email": "jackjpowell@gmail.com",
-    "url": "https://github.com/jackjpowell"
+    "name": "madalone (fork of Jack Powell)",
+    "email": "madalone@github.com",
+    "url": "https://github.com/mmadalone/uc-intg-broadlink"
   },
-  "home_page": "https://github.com/JackJPowell/uc-intg-broadlink",
+  "home_page": "https://github.com/mmadalone/uc-intg-broadlink",
   "setup_data_schema": {
     "title": {
       "en": "Integration setup",
@@ -39,5 +39,5 @@
       }
     ]
   },
-  "release_date": "2026-08-26"
+  "release_date": "2026-10-20"
 }

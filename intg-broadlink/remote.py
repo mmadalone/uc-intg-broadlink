@@ -61,14 +61,7 @@ class BroadlinkRemote(RemoteEntity):
 
     def get_int_param(self, param: str, params: dict[str, Any], default: int):
         """Get parameter in integer format."""
-        try:
-            value = params.get(param, default)
-        except AttributeError:
-            return default
-
-        if isinstance(value, str) and len(value) > 0:
-            return int(float(value))
-        return default
+        return self._get_int_param(param, params, default)
 
     async def command_handler(
         self,
@@ -88,19 +81,15 @@ class BroadlinkRemote(RemoteEntity):
         :param options: optional command options
         :return: status code of the command request
         """
-        repeat = 1
         _LOG.info("Got %s command request: %s %s", self.id, cmd_id, params)
 
         if self._device is None:
             _LOG.warning("No Broadlink instance for entity: %s", self.id)
             return StatusCodes.SERVICE_UNAVAILABLE
 
-        if params:
-            repeat = self.get_int_param("repeat", params, 1)
-
-        for _i in range(0, repeat):
-            await self.handle_command(cmd_id, params)
-        return StatusCodes.OK
+        # BL-4: report the device's result instead of always OK. BL-5: repeat is
+        # applied once, in handle_command (it used to be applied here as well).
+        return await self.handle_command(cmd_id, params)
 
     async def handle_command(
         self, cmd_id: str, params: dict[str, Any] | None = None
@@ -109,10 +98,7 @@ class BroadlinkRemote(RemoteEntity):
         if params is None:
             return StatusCodes.BAD_REQUEST
 
-        if params:
-            repeat = self._get_int_param("repeat", params, 1)
-        else:
-            repeat = 1
+        repeat = max(1, self._get_int_param("repeat", params, 1))
 
         if cmd_id == Commands.SEND_CMD:
             command_or_status = self._get_command_or_status_code(
@@ -121,30 +107,35 @@ class BroadlinkRemote(RemoteEntity):
             if isinstance(command_or_status, StatusCodes):
                 return command_or_status
 
-            success = True
             action = command_or_status.split(":")[0]
+            predefined_code = command_or_status
+            # BL-4: learning and removal run once and report their own result;
+            # sends stop at the first failure and report it.
+            match action.upper():
+                case "LEARN":
+                    mode = command_or_status.split(":")[1]
+                    match mode.upper():
+                        case "IR":
+                            return await self._device.learn_ir_command(
+                                command_or_status
+                            )
+                        case "RF":
+                            return await self._device.learn_rf_command(
+                                command_or_status
+                            )
+                    return StatusCodes.BAD_REQUEST
+                case "REMOVE" | "DELETE":
+                    return await self._device.remove_command(
+                        command_or_status.split(":", 1)[1]
+                    )
+                case "SEND":
+                    predefined_code = command_or_status.split(":", 1)[1]
             for _ in range(0, repeat):
-                match action.upper():
-                    case "LEARN":
-                        mode = command_or_status.split(":")[1]
-                        match mode.upper():
-                            case "IR":
-                                await self._device.learn_ir_command(command_or_status)
-                                return StatusCodes.OK
-                            case "RF":
-                                await self._device.learn_rf_command(command_or_status)
-                    case "REMOVE" | "DELETE":
-                        await self._device.remove_command(
-                            command_or_status.split(":", 1)[1]
-                        )
-                    case "SEND":
-                        await self._device.send_command(
-                            predefined_code=command_or_status.split(":", 1)[1]
-                        )
-                    case _:
-                        await self._device.send_command(
-                            predefined_code=command_or_status
-                        )
+                result = await self._device.send_command(
+                    predefined_code=predefined_code
+                )
+                if result != StatusCodes.OK:
+                    return result
             return StatusCodes.OK
 
         if cmd_id == Commands.SEND_CMD_SEQUENCE:
@@ -186,6 +177,15 @@ class BroadlinkRemote(RemoteEntity):
         except AttributeError:
             return default
 
+        # BL-5: accept integers as well as strings (only strings used to be parsed,
+        # so an integer repeat value was silently ignored).
+        if isinstance(value, bool):
+            return default
+        if isinstance(value, int):
+            return value
         if isinstance(value, str) and len(value) > 0:
-            return int(float(value))
+            try:
+                return int(float(value))
+            except ValueError:
+                return default
         return default
