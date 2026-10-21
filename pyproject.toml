@@ -1,6 +1,6 @@
 [project]
 name = "uc-intg-broadlink"
-version = "1.3.0+madalone.1"
+version = "1.3.0+madalone.2"
 description = "Broadlink integration for Unfolded Circle Remotes"
 readme = "README.md"
 requires-python = ">=3.12"

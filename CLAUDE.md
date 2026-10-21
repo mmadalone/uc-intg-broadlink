@@ -7,13 +7,13 @@ DON'T BE SYCOPHANTIC
 Fork of [JackJPowell/uc-intg-broadlink](https://github.com/JackJPowell/uc-intg-broadlink) for the **Unfolded Circle Remote 3**. Python async integration driver on `ucapi` 0.7.0 + `ucapi-framework` + `python-broadlink` 0.19.0.
 
 - **Fork repo:** `mmadalone/uc-intg-broadlink` (public GitHub fork). Local clone: `C:\Users\mique\_Claude Projects\uc-integration-broadlink`. Remotes: `origin` = fork, `upstream` = JackJPowell.
-- **Base:** upstream tag `v1.3.0` (`06d8e6d`, 2026-08-26). Branch `v1.3.0-patched`. Fork version `1.3.0-madalone.1` in `driver.json`; `pyproject.toml` uses the PEP 440 form `1.3.0+madalone.1`.
+- **Base:** upstream tag `v1.3.0` (`06d8e6d`, 2026-08-26). Branch `v1.3.0-patched`. Fork version `1.3.0-madalone.2` in `driver.json`; `pyproject.toml` uses the PEP 440 form `1.3.0+madalone.2`. Installed on the Remote: `1.3.0-madalone.1` since 2026-10-21 09:11 UTC (manual upload); madalone.2 built, not yet installed.
 - **Devices:** UC Remote 3 at `192.168.2.204`. **The web-configurator PIN is deliberately not recorded here: this file is tracked and public.** Broadlink RM4 mini at `192.168.2.124`.
 - **Sibling fork with the same history and conventions:** `C:\Users\mique\_Claude Projects\integration-kodi-patch` (Kodi). Its CLAUDE.md documents uc-intg-manager, log retrieval and the deploy flow in depth.
 
 ## Patches
 
-`BROADLINK-PATCHES.md` is the source of truth: root causes, BL-1…BL-6, verification, deploy notes. Summary:
+`BROADLINK-PATCHES.md` is the source of truth: root causes, BL-1…BL-7, verification, deploy notes. Summary:
 
 | ID | What |
 |----|------|
@@ -23,6 +23,7 @@ Fork of [JackJPowell/uc-intg-broadlink](https://github.com/JackJPowell/uc-intg-b
 | BL-4 | Command handlers return the real result instead of always OK |
 | BL-5 | `repeat` accepts int and str, applied once |
 | BL-6 | CI: no GHCR docker job; tag must match `driver.json` |
+| BL-7 | Fail fast when the Broadlink stops answering. A quick 1 s probe instead of a ~6 s reconnect; no retry within 2 s of a failed attempt, so queued presses can't fire late; background reconnect while awake (5 → 10 → 30 → 60 s), requested by the device when a command gives up; BL-2's 3 s window is a real bound. The normal send path and its 4 s timeout are unchanged |
 
 ## Build (Windows Git Bash)
 
@@ -61,8 +62,11 @@ These mirror `.github/workflows/build.yml`.
   - `Connect attempt N failed, retrying in …`
   - `Connected after N attempts`
   - `Device not connected, reconnecting before sending` (BL-2)
-  - `Cannot send command: device not connected` (gave up after the reconnect window)
+  - `Device did not answer recently, probing once before sending` (BL-7 quick probe)
+  - `Reconnected after N background attempts` (BL-7 background retry)
+  - `Cannot send command: device not connected` (gave up)
 - Upstream-era baseline (2026-10-17..20): 28 of 128 wakes failed with `[Errno 101] Network is unreachable` and never recovered within the wake.
+- **ucapi 0.7.0 handles each connection's requests one at a time.** `_ws_router` awaits each message before reading the next. A command handler that waits on the device delays every later press, and the standby events too. Keep handler waits short. Harness presses must be awaited in order to model this.
 
 ## Code conventions
 
@@ -77,11 +81,15 @@ These mirror `.github/workflows/build.yml`.
 git fetch upstream --tags
 git log --oneline v1.3.0..upstream/main   # what upstream has added
 ```
-For a new upstream release: create `vX.Y.Z-patched` from the upstream tag and re-apply BL-1…BL-6. Never rebase a published branch in place. Re-check whether upstream has fixed any of the root causes before re-applying.
+For a new upstream release: create `vX.Y.Z-patched` from the upstream tag and re-apply BL-1…BL-7. Never rebase a published branch in place. Re-check whether upstream has fixed any of the root causes before re-applying.
 
-## Validation pending (on device)
+## Validation
 
-- B1: wake the remote **with a button press** on an activity that uses the Broadlink. The press should act. In the log (`p=7`), a wake whose first connect failed shows `Connected after N attempts` (the wake retry) or `Device authenticated and ready` just before the send (the press reconnected by itself). There should be no `Cannot send command`.
+Done on the device with madalone.1 (2026-10-21; details in `BROADLINK-PATCHES.md`):
+- B3: the entity records were byte-identical after the upload. The integration holds no learned codes here; the IR codes live in the Remote.
+- B4: with the Broadlink unplugged, the first press got an error after 10.07 s and later presses after 6.0 s. An activity started meanwhile still ran its other steps. After replugging, the next press worked in 0.31 s. This measurement led to BL-7.
+
+Pending:
+- B1: wake the remote **with a button press that goes through the Broadlink**. The press should act. In the log (`p=7`), a wake whose first connect failed shows `Connected after N attempts` (the wake retry) or `Device authenticated and ready` just before the send (the press reconnected by itself). There should be no `Cannot send command`. On 2026-10-21 the Broadlink reconnected 1.2 s after a wake, but that wake was triggered by a Kodi button.
 - B2: a dozen ordinary wakes. No `Cannot send command`.
-- B3: the learned-code list is identical after installing.
-- B4: with the Broadlink unplugged, a press returns an error within ~6 s. Note whether an activity's start sequence stops or continues.
+- B5 (madalone.2): with the Broadlink unplugged, the first press errors after ~5 s and later presses within ~1 s (or at once within 2 s of a failure). After replugging, the Broadlink comes back without a press, and `Reconnected after N background attempts` appears in the log.

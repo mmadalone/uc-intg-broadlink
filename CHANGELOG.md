@@ -11,6 +11,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## v1.3.0-madalone.2 - 2026-10-21
+
+### Fixed
+- **Errors come back in seconds when the Broadlink can't be reached (BL-7).** With the Broadlink unplugged, the first press used to report its error after 10 seconds and every later press after 6. Repeated presses also waited behind each other: the fifth was answered after 34 seconds. If the Broadlink came back while presses were waiting, they were all sent at once, late.
+  - Now the first error comes after about 5 seconds and later ones within a second.
+  - Presses that queued behind a failure are rejected instead of being sent late.
+  - While the Remote is awake, the driver keeps reconnecting in the background, so the Broadlink is usable again without a button press.
+  - Sending to a Broadlink that answers is unchanged.
+- **The press that wakes the Remote waits at most its 3-second reconnect window (BL-7).** Before, it could wait ~6 seconds for a connect attempt against a Broadlink that wasn't answering.
+
+---
+
 ## v1.3.0-madalone.1 - 2026-10-21
 
 madalone fork of upstream v1.3.0. Details and evidence in [BROADLINK-PATCHES.md](BROADLINK-PATCHES.md).

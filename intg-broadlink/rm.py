@@ -11,7 +11,12 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 import broadlink
-from broadlink.exceptions import BroadlinkException, ReadError, StorageError
+from broadlink.exceptions import (
+    BroadlinkException,
+    NetworkTimeoutError,
+    ReadError,
+    StorageError,
+)
 from ucapi import StatusCodes
 from ucapi.media_player import States as PowerState
 from ucapi_framework import (
@@ -26,6 +31,9 @@ _LOG = logging.getLogger(__name__)
 LEARNING_TIMEOUT = timedelta(seconds=30)
 # BL-2: python-broadlink waits up to 10 s per request by default, resending every 1 s.
 # A shorter timeout keeps an unreachable device from stalling commands for that long.
+# BL-7 keeps 4 s (Home Assistant uses 5). An unanswered send is resent after a
+# reconnect, so if a device only answers once a long code has gone out, a timeout
+# shorter than that code would send it twice.
 DEVICE_TIMEOUT = 4
 # Directed hello, then broadcast discovery: a device on the LAN answers in milliseconds,
 # so an unreachable one costs ~6 s per connect attempt instead of ~10 s (was 5 + 5).
@@ -34,6 +42,17 @@ DISCOVERY_TIMEOUT = 3
 # button press that wakes the remote arrives before the remote's Wi-Fi is back.
 COMMAND_RECONNECT_WINDOW = 3.0
 COMMAND_RECONNECT_INTERVAL = 0.5
+# BL-7: once the device has failed to answer (unplugged, off Wi-Fi), a command gets one
+# short directed hello, without discovery, instead of the window above. ucapi handles
+# requests one at a time, so every second a press waits also delays the presses queued
+# behind it.
+QUICK_PROBE_TIMEOUT = 1.0
+# Presses within this long of an unanswered attempt fail at once. They are the presses
+# that queued up behind it, and sending them late, once the device is back, is worse.
+PROBE_HOLDOFF = 2.0
+# How long a press waits for a connect attempt that is already running (the driver's
+# background retry) before giving up.
+PROBE_LOCK_WAIT = 1.0
 
 
 @dataclass
@@ -71,6 +90,11 @@ class Broadlink(ExternalClientDevice):
         # python-broadlink call at a time (the library's own device lock never engages).
         self._connect_lock = asyncio.Lock()
         self._io_lock = asyncio.Lock()
+        # BL-7: loop time of the last attempt the device did not answer (None: it
+        # answered, or hasn't been tried since the remote woke), and whether
+        # create_client() makes a quick probe instead of a full connect.
+        self._unanswered_at: float | None = None
+        self._quick_probe = False
 
     @property
     def identifier(self) -> str:
@@ -118,22 +142,115 @@ class Broadlink(ExternalClientDevice):
         """Reconnect for a command, retrying for up to COMMAND_RECONNECT_WINDOW (BL-2).
 
         If a connect attempt is already running (the driver's wake retry), its result
-        is awaited first instead of queueing another attempt behind it.
+        is awaited first instead of queueing another attempt behind it, but not past
+        the window (BL-7): against a device that doesn't answer it takes ~6 s. Once an
+        attempt has found the device silent, the press switches to the quick probe.
         """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + COMMAND_RECONNECT_WINDOW
-        if self._connect_lock.locked():
-            async with self._connect_lock:
-                pass
-            if self.is_connected and self._client:
-                return True
         while loop.time() < deadline:
-            if await self.connect() and self._client:
+            if self._unanswered_at is not None:
+                return await self._probe_for_command()
+            if self._connect_lock.locked():
+                if not await self._wait_for_attempt(deadline - loop.time()):
+                    return False
+                if self.is_connected and self._client:
+                    return True
+            elif await self.connect() and self._client:
                 return True
             if loop.time() + COMMAND_RECONNECT_INTERVAL > deadline:
                 break
             await asyncio.sleep(COMMAND_RECONNECT_INTERVAL)
         return False
+
+    async def _wait_for_attempt(self, timeout: float) -> bool:
+        """Wait up to ``timeout`` seconds for the connect attempt in progress (BL-7)."""
+        try:
+            await asyncio.wait_for(self._connect_lock.acquire(), max(timeout, 0.0))
+        except asyncio.TimeoutError:
+            return False
+        self._connect_lock.release()
+        return True
+
+    def forget_unanswered(self) -> None:
+        """Forget that the device did not answer (BL-7).
+
+        The driver calls this on standby and on wake. Right after a wake the remote's
+        own Wi-Fi may still be down, and a press must wait for it (BL-2) rather than
+        fail fast.
+        """
+        self._unanswered_at = None
+
+    def _note_unanswered(self) -> None:
+        """Record that the device did not answer while the network was usable (BL-7)."""
+        self._unanswered_at = asyncio.get_running_loop().time()
+
+    def _keep_reconnecting(self) -> None:
+        """Ask the driver to keep reconnecting in the background (BL-7).
+
+        Only a command notices a Broadlink lost while the remote is awake: the protocol
+        is UDP, and nothing else talks to the device in between.
+        """
+        reconnect = getattr(self.driver, "reconnect_in_background", None)
+        if reconnect is not None:
+            reconnect(self.identifier)
+
+    async def _probe_for_command(self) -> bool:
+        """Reconnect for a command when the device did not answer recently (BL-7).
+
+        One quick probe at most, and none within PROBE_HOLDOFF of the last unanswered
+        attempt. A connect attempt that is already running (the driver's background
+        retry, ~6 s against a silent device) is waited for only briefly.
+        """
+        loop = asyncio.get_running_loop()
+        since = self._unanswered_at
+        if since is not None and loop.time() - since < PROBE_HOLDOFF:
+            _LOG.debug(
+                "[%s] Device did not answer %.1fs ago, not retrying yet",
+                self.log_id,
+                loop.time() - since,
+            )
+            return False
+        try:
+            await asyncio.wait_for(self._connect_lock.acquire(), PROBE_LOCK_WAIT)
+        except asyncio.TimeoutError:
+            _LOG.debug("[%s] A connect attempt is still running", self.log_id)
+            return False
+        try:
+            if self.is_connected and self._client:
+                return True
+            since = self._unanswered_at
+            if since is not None and loop.time() - since < PROBE_HOLDOFF:
+                return False  # the attempt we waited for has just failed
+            _LOG.info(
+                "[%s] Device did not answer recently, probing once before sending",
+                self.log_id,
+            )
+            return await self._quick_connect() and self._client is not None
+        finally:
+            self._connect_lock.release()
+
+    async def _reconnect_after_failed_send(self) -> bool:
+        """Reconnect once after a send went unanswered (BL-7).
+
+        A quick probe instead of a full connect. If the device has stopped answering
+        this fails within a second, and the driver keeps retrying in the background.
+        """
+        async with self._connect_lock:
+            if self.is_connected:
+                return True
+            return await self._quick_connect()
+
+    async def _quick_connect(self) -> bool:
+        """Connect with one short directed hello and no discovery (BL-7).
+
+        The caller holds ``_connect_lock``.
+        """
+        self._quick_probe = True
+        try:
+            return await super().connect()
+        finally:
+            self._quick_probe = False
 
     async def _run_io(self, func, *args, **kwargs):
         """Run a blocking python-broadlink call off the event loop (BL-2).
@@ -159,17 +276,23 @@ class Broadlink(ExternalClientDevice):
             self.address,
         )
 
+        hello_timeout = QUICK_PROBE_TIMEOUT if self._quick_probe else DISCOVERY_TIMEOUT
         # Try connecting to stored IP address first
         try:
             device = await self._run_io(
                 broadlink.hello,
                 ip_address=self._device_config.address,
-                timeout=DISCOVERY_TIMEOUT,
+                timeout=hello_timeout,
             )
             if device:
                 device.timeout = DEVICE_TIMEOUT
                 return device
         except Exception as ip_err:
+            if self._quick_probe:
+                # BL-7: no discovery fallback; the driver's background retry has one.
+                if isinstance(ip_err, NetworkTimeoutError):
+                    self._note_unanswered()
+                raise
             _LOG.warning(
                 "[%s] Failed to connect to stored IP %s: %s. Trying discovery...",
                 self.log_id,
@@ -199,6 +322,8 @@ class Broadlink(ExternalClientDevice):
             device.timeout = DEVICE_TIMEOUT
             return device
 
+        # BL-7: the hello and the broadcast went out, and nothing answered.
+        self._note_unanswered()
         raise Exception(f"Device with MAC {self.identifier} not found on network")
 
     async def connect_client(self) -> None:
@@ -207,7 +332,11 @@ class Broadlink(ExternalClientDevice):
             raise Exception("Client not created")
 
         _LOG.debug("[%s] Authenticating with Broadlink device", self.log_id)
-        await self._run_io(self._client.auth)  # type: ignore[attr-defined]
+        try:
+            await self._run_io(self._client.auth)  # type: ignore[attr-defined]
+        except NetworkTimeoutError:
+            self._note_unanswered()  # BL-7
+            raise
 
         # Verify we connected to the correct device by checking MAC address
         if hasattr(self._client, "mac") and self._client.mac:
@@ -236,6 +365,7 @@ class Broadlink(ExternalClientDevice):
                     self.update_config(address=current_ip)
 
         self._state.state = PowerState.ON
+        self._unanswered_at = None  # BL-7
         _LOG.debug("[%s] Device authenticated and ready", self.log_id)
         self.reload_sources()
         self.push_update()
@@ -271,14 +401,21 @@ class Broadlink(ExternalClientDevice):
     ) -> StatusCodes:
         """Send a command to the Broadlink."""
         if not self.is_connected or not self._client:
-            # BL-2: reconnect on demand instead of dropping the press.
-            _LOG.info(
-                "[%s] Device not connected, reconnecting before sending", self.log_id
-            )
-            if not await self._reconnect_for_command():
+            if self._unanswered_at is None:
+                # BL-2: reconnect on demand instead of dropping the press.
+                _LOG.info(
+                    "[%s] Device not connected, reconnecting before sending",
+                    self.log_id,
+                )
+                connected = await self._reconnect_for_command()
+            else:
+                # BL-7: the device has not been answering; don't make the press wait.
+                connected = await self._probe_for_command()
+            if not connected:
                 _LOG.warning(
                     "[%s] Cannot send command: device not connected", self.log_id
                 )
+                self._keep_reconnecting()  # BL-7
                 return StatusCodes.SERVICE_UNAVAILABLE
 
         # Clear media title/artist
@@ -310,7 +447,7 @@ class Broadlink(ExternalClientDevice):
                 )
                 # Force reconnection
                 await self.disconnect()
-                await self.connect()
+                await self._reconnect_after_failed_send()  # BL-7: a quick probe
 
                 # Retry once
                 try:
@@ -329,6 +466,7 @@ class Broadlink(ExternalClientDevice):
                     return StatusCodes.SERVER_ERROR
                 # BL-4: the reconnect failed, so nothing was sent.
                 self.emit(device, command, "Error")
+                self._keep_reconnecting()  # BL-7
                 return StatusCodes.SERVICE_UNAVAILABLE
             except Exception as err:  # pylint: disable=broad-exception-caught
                 _LOG.error(
@@ -357,7 +495,7 @@ class Broadlink(ExternalClientDevice):
                 )
                 # Force reconnection and retry
                 await self.disconnect()
-                await self.connect()
+                await self._reconnect_after_failed_send()  # BL-7: a quick probe
 
                 try:
                     if self._client:
@@ -371,6 +509,7 @@ class Broadlink(ExternalClientDevice):
                     )
                     return StatusCodes.SERVER_ERROR
                 # BL-4: the reconnect failed, so nothing was sent.
+                self._keep_reconnecting()  # BL-7
                 return StatusCodes.SERVICE_UNAVAILABLE
             except Exception as err:  # pylint: disable=broad-exception-caught
                 _LOG.error(
