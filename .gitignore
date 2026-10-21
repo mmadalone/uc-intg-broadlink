@@ -10,3 +10,8 @@ wheels/
 .venv
 uv.lock
 config
+
+# Fork: local PyInstaller build output (see CLAUDE.md "Build")
+*.spec
+artifacts/
+*.tar.gz

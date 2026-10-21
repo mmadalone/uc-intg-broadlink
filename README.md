@@ -6,6 +6,10 @@
 
 # Broadlink integration for Remote Two/3
 
+> **madalone fork.** This is a patched fork of [JackJPowell/uc-intg-broadlink](https://github.com/JackJPowell/uc-intg-broadlink) v1.3.0. It reconnects reliably after the Remote wakes (upstream makes a single connect attempt, which often fails because the Remote's Wi-Fi isn't up yet), keeps blocking Broadlink calls off the event loop, reports failed IR sends instead of answering "OK", and updates ucapi-framework to 1.9.8 for its lost-subscription fix. Details in [BROADLINK-PATCHES.md](BROADLINK-PATCHES.md).
+>
+> Install and update this fork by uploading its release tarball in the web configurator. **Do not use Integration Manager's Update button for it:** that installs upstream over the fork.
+
 This integration is based on the [broadlink](https://github.com/mjg59/python-broadlink) library and uses the
 [uc-integration-api](https://github.com/aitatoi/integration-python-library) to communicate with the Remote Two/3.
 
