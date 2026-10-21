@@ -147,6 +147,16 @@ Wake behaviour is unchanged. S1–S8 give the same results as madalone.1, except
 - **B3:** the three entity records were byte-identical before and after the upload. This household's integration holds no learned codes; its IR codes live in the Remote.
 - **B4, Broadlink unplugged:** the first press was answered `503` after 10.07 s, as the harness predicted (10.0 s). Four later presses took 6.03–6.04 s each. The Remote showed an error and waited the full time; it has no shorter timeout of its own. An activity started meanwhile still ran its other steps. After replugging, the first press reconnected and was sent in 0.31 s.
 - **Wake:** a press that woke the Remote reached Kodi after 1.15 s, and the Broadlink reconnected 1.2 s after the same wake.
+- **B1, a Broadlink button wakes the Remote:** at 12:48:10 UTC, `exit_standby` and the IR command arrived in the same millisecond. The wake retry connected in 34 ms, and the press was answered `200` 125 ms after the wake.
+
+### On the device (madalone.2, installed 2026-10-21 12:51 UTC)
+
+- **B5, Broadlink unplugged:**
+  - The first press was answered `503` after **5.05 s**: `Custom command failed … within 4s`, then the 1 s quick probe. The harness predicted 5.0 s.
+  - Eleven later presses got their error in about 1 s (a quick probe, or `A connect attempt is still running`) or in 15–18 ms (`Device did not answer …s ago, not retrying yet`).
+  - Background retries ran at +5, +10, +30 and +60 s. The 4th one, `Reconnected after 4 background attempts`, connected within about a second of the Broadlink answering again.
+  - The next six presses were sent in 33–137 ms. None of the failed presses was sent late.
+- No standby wake happened on madalone.2 that day: the Remote never slept after the install. Its wake path is unchanged from madalone.1 and proven offline (S1–S9).
 
 Upstream's `test_pronto_conversion.py` doesn't run on either tree: it is a development script that fails with `IndentationError` at line 68 on pristine v1.3.0. The fork doesn't touch IR conversion. The isort/flake8 findings are identical to pristine upstream, and black reports no changes.
 
