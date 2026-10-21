@@ -27,7 +27,13 @@ LEARNING_TIMEOUT = timedelta(seconds=30)
 # BL-2: python-broadlink waits up to 10 s per request by default, resending every 1 s.
 # A shorter timeout keeps an unreachable device from stalling commands for that long.
 DEVICE_TIMEOUT = 4
-DISCOVERY_TIMEOUT = 5
+# Directed hello, then broadcast discovery: a device on the LAN answers in milliseconds,
+# so an unreachable one costs ~6 s per connect attempt instead of ~10 s (was 5 + 5).
+DISCOVERY_TIMEOUT = 3
+# A command that finds the device disconnected keeps reconnecting for this long: the
+# button press that wakes the remote arrives before the remote's Wi-Fi is back.
+COMMAND_RECONNECT_WINDOW = 3.0
+COMMAND_RECONNECT_INTERVAL = 0.5
 
 
 @dataclass
@@ -107,6 +113,27 @@ class Broadlink(ExternalClientDevice):
             if self.is_connected:
                 return True
             return await super().connect()
+
+    async def _reconnect_for_command(self) -> bool:
+        """Reconnect for a command, retrying for up to COMMAND_RECONNECT_WINDOW (BL-2).
+
+        If a connect attempt is already running (the driver's wake retry), its result
+        is awaited first instead of queueing another attempt behind it.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + COMMAND_RECONNECT_WINDOW
+        if self._connect_lock.locked():
+            async with self._connect_lock:
+                pass
+            if self.is_connected and self._client:
+                return True
+        while loop.time() < deadline:
+            if await self.connect() and self._client:
+                return True
+            if loop.time() + COMMAND_RECONNECT_INTERVAL > deadline:
+                break
+            await asyncio.sleep(COMMAND_RECONNECT_INTERVAL)
+        return False
 
     async def _run_io(self, func, *args, **kwargs):
         """Run a blocking python-broadlink call off the event loop (BL-2).
@@ -244,14 +271,11 @@ class Broadlink(ExternalClientDevice):
     ) -> StatusCodes:
         """Send a command to the Broadlink."""
         if not self.is_connected or not self._client:
-            # BL-2: reconnect on demand instead of dropping the press. connect() is
-            # locked, so a reconnect already in progress (e.g. right after a wake) is
-            # awaited rather than duplicated.
+            # BL-2: reconnect on demand instead of dropping the press.
             _LOG.info(
                 "[%s] Device not connected, reconnecting before sending", self.log_id
             )
-            await self.connect()
-            if not self.is_connected or not self._client:
+            if not await self._reconnect_for_command():
                 _LOG.warning(
                     "[%s] Cannot send command: device not connected", self.log_id
                 )
