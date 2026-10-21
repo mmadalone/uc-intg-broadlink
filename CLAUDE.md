@@ -29,7 +29,7 @@ Fork of [JackJPowell/uc-intg-broadlink](https://github.com/JackJPowell/uc-intg-b
 ```bash
 cd "C:/Users/mique/_Claude Projects/uc-integration-broadlink"
 rm -rf build dist artifacts
-MSYS_NO_PATHCONV=1 docker run --rm -v "$(pwd)":/workspace \
+MSYS_NO_PATHCONV=1 docker run --rm --platform=linux/arm64 -v "$(pwd)":/workspace \
   docker.io/unfoldedcircle/r2-pyinstaller:3.11.12-0.3.0 \
   bash -c "cd /workspace && python -m pip install -r requirements.txt && pyinstaller --clean --onedir --name intg-broadlink_driver --collect-all zeroconf intg-broadlink/driver.py"
 mkdir -p artifacts/bin && mv dist/intg-broadlink_driver/* artifacts/bin/ && mv artifacts/bin/intg-broadlink_driver artifacts/bin/driver && cp driver.json artifacts/
@@ -38,6 +38,7 @@ cd artifacts && tar czf ../uc-intg-broadlink_driver-<VERSION>-aarch64.tar.gz . &
 
 These mirror `.github/workflows/build.yml`.
 - `MSYS_NO_PATHCONV=1` is required on Git Bash.
+- **`--platform=linux/arm64` is required.** The `3.11.12-0.3.0` tag is a manifest list whose only image is arm64. On this amd64 host Docker refuses to choose one (`no matching manifest for linux/amd64`) unless told to; Docker Desktop then emulates arm64. The Kodi fork's `3.11.13-0.4.0` tag is a plain arm64 image, so Docker runs it under emulation without the flag.
 - Run `tar` from inside the folder with relative paths: a `C:/…` path makes tar treat the colon as `host:path`.
 - Tarball layout: `./driver.json`, `./bin/driver`, `./bin/_internal/`.
 
