@@ -81,7 +81,7 @@ For a new upstream release: create `vX.Y.Z-patched` from the upstream tag and re
 
 ## Validation pending (on device)
 
-- B1: wake the remote **with a button press** on an activity that uses the Broadlink. The press should act, and the log should show either `Connected after N attempts` or a reconnect before sending.
+- B1: wake the remote **with a button press** on an activity that uses the Broadlink. The press should act. In the log (`p=7`), a wake whose first connect failed shows `Connected after N attempts` (the wake retry) or `Device authenticated and ready` just before the send (the press reconnected by itself). There should be no `Cannot send command`.
 - B2: a dozen ordinary wakes. No `Cannot send command`.
 - B3: the learned-code list is identical after installing.
 - B4: with the Broadlink unplugged, a press returns an error within ~6 s. Note whether an activity's start sequence stops or continues.

@@ -79,6 +79,9 @@ The harness runs the **real** driver (`BroadlinkDriver` here, `BaseIntegrationDr
 | S6 driver starts offline, Remote subscribes before Wi-Fi is back (Discord reporter) | IR emitter never configured; presses → 404 `no configured entity` | configured once Wi-Fi returns; press OK |
 | S7 Remote sleeps again during the wake retry | no connect after sleep | no connect after sleep |
 | S8 `repeat`: IR emitter int 3 / str "3"; remote int 3 / str "3" | 1 / 3 / 1 / **9** sends | 3 / 3 / 3 / 3 sends |
+| S9 replay of the 28 dead wakes of 2026-10-17..19: one driver across all wakes, the real press timings (0.69 s to 30.5 s after waking) and the real IR codes from the log; Wi-Fi back after 0.3 / 0.6 / 1 / 2 / 3 s | 28/28 wakes never connect; 22 presses answered "OK", **0 sent**, at every Wi-Fi time (matches the log exactly) | 0/28; connected 0.04–0.46 s after Wi-Fi returned; 22/22 sent; slowest answer 2.6 s (a press 0.69 s into a wake whose Wi-Fi took 3 s) |
+
+S9: the log doesn't record how long Wi-Fi took to come back, so the replay sweeps the range seen for the Kodi integration on the same Remote. Upstream reproducing the log exactly is the check that the replay is faithful. A press waits at most the 3 s reconnect window. If Wi-Fi takes longer, the press fails with `SERVICE_UNAVAILABLE` (S4), and the wake retry still connects once Wi-Fi is back. Script: `bl_replay.py` next to the harness.
 
 Upstream's `test_pronto_conversion.py` doesn't run on either tree: it is a development script that fails with `IndentationError` at line 68 on pristine v1.3.0. The fork doesn't touch IR conversion. The isort/flake8 findings are identical to pristine upstream, and black reports no changes.
 
