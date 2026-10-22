@@ -22,7 +22,7 @@ Fork of [JackJPowell/uc-intg-broadlink](https://github.com/JackJPowell/uc-intg-b
 | BL-3 | ucapi-framework 1.9.6 → 1.9.8 (lost-subscription fix) |
 | BL-4 | Command handlers return the real result instead of always OK |
 | BL-5 | `repeat` accepts int and str, applied once |
-| BL-6 | CI: no GHCR docker job; tag must match `driver.json` |
+| BL-6 | CI: no GHCR docker job; tag must match `driver.json`; ARM emulation via `docker/setup-qemu-action` (no apt, no `multiarch/qemu-user-static`) |
 | BL-7 | Fail fast when the Broadlink stops answering. A quick 1 s probe instead of a ~6 s reconnect; no retry within 2 s of a failed attempt, so queued presses can't fire late; background reconnect while awake (5 → 10 → 30 → 60 s), requested by the device when a command gives up; BL-2's 3 s window is a real bound. The normal send path and its 4 s timeout are unchanged |
 
 ## Build (Windows Git Bash)

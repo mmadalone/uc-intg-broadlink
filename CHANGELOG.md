@@ -30,7 +30,7 @@ First release of the madalone fork of upstream v1.3.0. It includes madalone.1, w
 - **The press that wakes the Remote waits at most its 3-second reconnect window (BL-7).** Before, it could wait ~6 seconds for a connect attempt against a Broadlink that wasn't answering.
 
 ### Changed
-- CI: no Docker image is published; the release tag must match `driver.json` (BL-6).
+- CI: no Docker image is published; the release tag must match `driver.json`; ARM emulation is set up with Docker's own action instead of being installed from Ubuntu's package mirrors, which hung the first release build (BL-6).
 
 ### Tested on a Remote 3 before release
 - **31 wakes in a day, all reconnected** (worst 1.26 s). On 5 of them the first attempt failed because the Remote's Wi-Fi was still coming up. Upstream never recovers from that within the wake; here each one reconnected within about half a second.

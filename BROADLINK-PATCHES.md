@@ -62,6 +62,7 @@ Fork of [JackJPowell/uc-intg-broadlink](https://github.com/JackJPowell/uc-intg-b
 - The release job needs only `build`.
 - The tag must match `driver.json` `version`, or the build fails. Without this check a stale `driver.json` would publish an asset named after the wrong version. Upstream's version line strips a `v` from `GITHUB_REF`, so a manual (dispatch) run fails the check instead of publishing a mislabelled release.
 - Upstream's builder image `r2-pyinstaller:3.11.12-0.3.0` is kept.
+- ARM emulation is set up with `docker/setup-qemu-action@v3` (arm64) instead of `apt-get install qemu-system-arm binfmt-support qemu-user-static` plus the unmaintained `multiarch/qemu-user-static` image (last updated 2023). The first release build on 2026-10-22 hung for 12 minutes in `apt-get update` on an unreachable Ubuntu mirror (`azure.archive.ubuntu.com`) before anything was built, and was cancelled. The action needs no package mirror.
 
 ## BL-7: Fail fast when the Broadlink stops answering
 
