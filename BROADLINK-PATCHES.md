@@ -157,6 +157,12 @@ Wake behaviour is unchanged. S1–S8 give the same results as madalone.1, except
   - Background retries ran at +5, +10, +30 and +60 s. The 4th one, `Reconnected after 4 background attempts`, connected within about a second of the Broadlink answering again.
   - The next six presses were sent in 33–137 ms. None of the failed presses was sent late.
 - No standby wake happened on madalone.2 that day: the Remote never slept after the install. Its wake path is unchanged from madalone.1 and proven offline (S1–S9).
+- **B2, a day of use (reviewed 2026-10-22 13:16 UTC):** 31 wakes, counted only where the log shows `exit_standby`.
+  - All 31 connected: median 0.13 s after the wake, worst 1.26 s.
+  - On 5 wakes the first attempt failed with `Network is unreachable`, the original bug. They recovered 0.45–0.51 s after the wake.
+  - 2 wakes were triggered by a Broadlink `send_ir` (B1 on madalone.2). Both were sent, in 0.02 s and 0.08 s.
+  - Every non-200 answer fell inside the deliberate unplug test (12:52:21–12:54:23 on 10-21); there were none in normal use.
+- Released as `v1.3.0-madalone.2` on 2026-10-22.
 
 Upstream's `test_pronto_conversion.py` doesn't run on either tree: it is a development script that fails with `IndentationError` at line 68 on pristine v1.3.0. The fork doesn't touch IR conversion. The isort/flake8 findings are identical to pristine upstream, and black reports no changes.
 

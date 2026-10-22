@@ -7,7 +7,7 @@ DON'T BE SYCOPHANTIC
 Fork of [JackJPowell/uc-intg-broadlink](https://github.com/JackJPowell/uc-intg-broadlink) for the **Unfolded Circle Remote 3**. Python async integration driver on `ucapi` 0.7.0 + `ucapi-framework` + `python-broadlink` 0.19.0.
 
 - **Fork repo:** `mmadalone/uc-intg-broadlink` (public GitHub fork). Local clone: `C:\Users\mique\_Claude Projects\uc-integration-broadlink`. Remotes: `origin` = fork, `upstream` = JackJPowell.
-- **Base:** upstream tag `v1.3.0` (`06d8e6d`, 2026-08-26). Branch `v1.3.0-patched`. Fork version `1.3.0-madalone.2` in `driver.json`; `pyproject.toml` uses the PEP 440 form `1.3.0+madalone.2`. Installed on the Remote: `1.3.0-madalone.2` since 2026-10-21 12:51 UTC (manual upload; madalone.1 had been installed at 09:11 UTC).
+- **Base:** upstream tag `v1.3.0` (`06d8e6d`, 2026-08-26). Branch `v1.3.0-patched`. Fork version `1.3.0-madalone.2` in `driver.json`; `pyproject.toml` uses the PEP 440 form `1.3.0+madalone.2`. Installed on the Remote: `1.3.0-madalone.2` since 2026-10-21 12:51 UTC (manual upload; madalone.1 had been installed at 09:11 UTC). First fork release: `v1.3.0-madalone.2`, 2026-10-22.
 - **Devices:** UC Remote 3 at `192.168.2.204`. **The web-configurator PIN is deliberately not recorded here: this file is tracked and public.** Broadlink RM4 mini at `192.168.2.124`.
 - **Sibling fork with the same history and conventions:** `C:\Users\mique\_Claude Projects\integration-kodi-patch` (Kodi). Its CLAUDE.md documents uc-intg-manager, log retrieval and the deploy flow in depth.
 
@@ -92,5 +92,6 @@ Done on the device with madalone.1 (2026-10-21; details in `BROADLINK-PATCHES.md
 - B1 (madalone.1): a Broadlink button woke the Remote; the press was sent 125 ms after the wake.
 - B5 (madalone.2): unplugged, the first error came after 5.05 s and later ones within ~1 s or at once. After replugging, the Broadlink came back without a press (`Reconnected after 4 background attempts`), and nothing failed was sent late.
 
-Pending:
-- B2: a dozen ordinary wakes on madalone.2, at least one woken by a Broadlink button. Score a wake only where the log shows `enter_standby`/`exit_standby`. A Remote left untouched doesn't always sleep, for example when docked. Expect no `Cannot send command`. A wake whose first connect failed shows `Connected after N attempts` (the wake retry) or `Device authenticated and ready` just before the send (the press reconnected by itself).
+- B2 (madalone.2, a day of use): 31 wakes all connected (worst 1.26 s). 5 hit the original Wi-Fi-not-up-yet failure and recovered in ~0.5 s. 2 Broadlink-button wakes were sent OK. No errors outside the unplug test.
+
+For the next release, re-run B1, B2 and B5. Score a wake only where the log shows `enter_standby`/`exit_standby`: a Remote left untouched doesn't always sleep, for example when docked.
