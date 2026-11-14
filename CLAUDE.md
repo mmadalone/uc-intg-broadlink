@@ -7,7 +7,7 @@ DON'T BE SYCOPHANTIC
 Fork of [JackJPowell/uc-intg-broadlink](https://github.com/JackJPowell/uc-intg-broadlink) for the **Unfolded Circle Remote 3**. Python async integration driver on `ucapi` 0.7.0 + `ucapi-framework` + `python-broadlink` 0.19.0.
 
 - **Fork repo:** `mmadalone/uc-intg-broadlink` (public GitHub fork). Local clone: `C:\Users\mique\_Claude Projects\uc-integration-broadlink`. Remotes: `origin` = fork, `upstream` = JackJPowell.
-- **Base:** upstream tag `v1.3.0` (`06d8e6d`, 2026-08-26). Branch `v1.3.0-patched`. Fork version `1.3.0-madalone.3` in `driver.json` (BL-8, not released yet); `pyproject.toml` uses the PEP 440 form `1.3.0+madalone.3`. Installed on the Remote: a `1.3.0-madalone.3` test build since 2026-11-11 20:22 UTC (owner's manual upload; `1.3.0-madalone.2` before, since 2026-10-21 12:51 UTC). `GET /api/intg/drivers` (the list) kept showing the old version after the upload; `GET /api/intg/drivers/broadlink_driver` and the driver's `get_driver_version` showed the new one. First fork release: `v1.3.0-madalone.2`, 2026-10-22.
+- **Base:** upstream tag `v1.3.0` (`06d8e6d`, 2026-08-26). Branch `v1.3.0-patched`. Fork version `1.3.0-madalone.3` in `driver.json` (BL-8, released `v1.3.0-madalone.3` on 2026-11-14); `pyproject.toml` uses the PEP 440 form `1.3.0+madalone.3`. Installed on the Remote: a `1.3.0-madalone.3` test build since 2026-11-11 20:22 UTC (owner's manual upload; `1.3.0-madalone.2` before, since 2026-10-21 12:51 UTC). `GET /api/intg/drivers` (the list) kept showing the old version after the upload; `GET /api/intg/drivers/broadlink_driver` and the driver's `get_driver_version` showed the new one. First fork release: `v1.3.0-madalone.2`, 2026-10-22.
 - **Devices:** UC Remote 3 at `192.168.2.204`. **The web-configurator PIN is deliberately not recorded here: this file is tracked and public.** Broadlink RM4 mini at `192.168.2.124`.
 - **Sibling fork with the same history and conventions:** `C:\Users\mique\_Claude Projects\integration-kodi-patch` (Kodi). Its CLAUDE.md documents uc-intg-manager, log retrieval and the deploy flow in depth.
 
@@ -96,5 +96,11 @@ Done on the device with madalone.1 (2026-10-21; details in `BROADLINK-PATCHES.md
 - B5 (madalone.2): unplugged, the first error came after 5.05 s and later ones within ~1 s or at once. After replugging, the Broadlink came back without a press (`Reconnected after 4 background attempts`), and nothing failed was sent late.
 
 - B2 (madalone.2, a day of use): 31 wakes all connected (worst 1.26 s). 5 hit the original Wi-Fi-not-up-yet failure and recovered in ~0.5 s. 2 Broadlink-button wakes were sent OK. No errors outside the unplug test.
+
+- madalone.3 (BL-8, 2026-11-11..14; details in `BROADLINK-PATCHES.md`):
+  - B2-like: 239 IR sends, all 200.
+  - After a driver restart, POWER on a wake from standby was converted by the Remote and sent in 0.16 s.
+  - A HEX code was converted for the first time, also OK.
+  - Not re-run: B5, which BL-8 doesn't touch (harness W4), and a press that itself wakes the Remote before Wi-Fi is back. The motion sensor (sensitivity 3) wakes the Remote when it is picked up, so that case comes only from natural use: watch the log.
 
 For the next release, re-run B1, B2 and B5. Score a wake only where the log shows `enter_standby`/`exit_standby`: a Remote left untouched doesn't always sleep, for example when docked.

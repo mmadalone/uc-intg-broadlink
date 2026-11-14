@@ -226,6 +226,30 @@ All fixed above, or listed as limits.
 
 The S1–S9, U1–U11 and R1–R2 scripts of BL-1..BL-7 lived outside the repo and are gone. BL-8 changes no driver logic: `driver.py` only gets a log level. `rm.py` only moves the start of `send_command` into `ensure_connected_for_command`. W11, W12 and W14 cover its BL-2 branch and W2 its background-reconnect request; BL-7's quick-probe branch (a press right after an unanswered attempt) isn't re-run.
 
+### On the device (madalone.3)
+
+**Installs.** The first build went on 2026-11-11 at 20:22 UTC, the rebuild with the second review's fixes on 2026-11-12 at 19:13 UTC; both were the owner's manual uploads. After an upload, `GET /api/intg/drivers` (the list) kept showing the old version, while `GET /api/intg/drivers/broadlink_driver` and the driver's `get_driver_version` showed the new one.
+
+**Use, 2026-11-11 to 2026-11-14:**
+- 239 `send_ir` requests, all answered 200. There was no `Cannot convert`, retry or `Cannot send command` line.
+- Four presses arrived within 0.36 s of `exit_standby`, but the Remote's Wi-Fi was already back for each.
+- POWER alternates two PRONTO codes (a toggle bit), so each one is converted once.
+
+**Test after a driver restart** (the remembered conversions cleared by a Remote restart, 2026-11-12):
+- `enter_standby` at 20:22:45 UTC, `exit_standby` at 20:30:58; the Broadlink was connected 0.26 s later.
+- POWER arrived 10.6 s after the wake (the motion sensor had woken the Remote first). It was converted by the Remote and sent: 200 after 0.16 s.
+- The second POWER code was handled the same way, 0.09 s.
+- The next press used the remembered conversion.
+
+**HEX codes.** On 2026-11-14 the Netflix button's HEX codes were converted for the first time: 200 after 0.25 and 0.22 s.
+
+**Not seen yet: a press that itself wakes the Remote before its Wi-Fi is back**, the case of the two original failures.
+- With the motion sensor at its highest sensitivity, picking the Remote up wakes it before a button is pressed.
+- Two wakes on 2026-11-14 found Wi-Fi still down.
+- At 17:42:03 UTC the Broadlink connected only 3.08 s after `exit_standby`, after four `Errno 101`. That is longer than BL-2's last attempt at 2.5 s. A press that woke the Remote then would be answered 503 at 2.5 s, after the UI's default 2 s resend window. Raising "Retry commands after wakeup" (0–10 s, default 2) to 5 s lets the UI resend it.
+
+**Clearing the remembered conversions.** `PUT /api/intg/drivers/broadlink_driver?cmd=STOP` and `?cmd=START` only restart the Remote's connection to the driver, not the driver process (no new `Broadlink IR Emitter init`), so the remembered conversions survive. A Remote restart, or a new upload, clears them.
+
 ---
 
 ## Verification (offline harness, outside the repo)

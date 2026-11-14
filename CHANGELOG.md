@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+---
+
+## v1.3.0-madalone.3 - 2026-11-14
+
+Fixes the button press that wakes the Remote when the Remote converts its IR code (BL-8). Details and evidence are in [BROADLINK-PATCHES.md](BROADLINK-PATCHES.md).
+
 ### Fixed
 - **The button press that wakes the Remote works with codes the Remote converts (BL-8).** With a Remote API key set, PRONTO and HEX codes are converted by the Remote. The press that woke it asked for that conversion before the Remote's Wi-Fi was back, got "Network is unreachable", and answered `400`, which the Remote never resends: the TV didn't toggle and the Remote showed "Error sending the command".
   - Now the press waits for the connection to the Broadlink (it keeps trying for up to 3 seconds, as every command has since BL-2) and retries the conversion while the network still isn't up. Commands from an activity sequence, which the Remote never resends, are saved the same way.
@@ -22,6 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Known limitations
 - During a long Wi-Fi outage, presses wait for the network one after another, and the ones still waiting when it comes back are sent together, late. Raw and learned codes have behaved this way since BL-2; codes the Remote converts now do too, where they used to fail at once.
+- If the Remote's Wi-Fi takes longer than about 2.5 seconds to come back after a wake (seen once, 3.1 s), the press that woke it is answered 503, and the Remote's default 2-second resend window has already closed. Setting "Retry commands after wakeup" on the Remote to 5 seconds lets it resend that press.
+
+### Tested on a Remote 3 before release
+- **239 IR sends over three days of normal use, all answered OK**, including wake presses arriving within 0.4 s of the wake.
+- **After a driver restart, POWER on a wake from standby** had to be converted by the Remote again: converted and sent in 0.16 s, TV on, no error. A HEX code (the Netflix button) was converted for the first time as well.
+- Not seen on the Remote yet: a press that itself wakes the Remote while its Wi-Fi is still down, the case of the two original failures. The offline harness covers it.
 
 ---
 
