@@ -7,13 +7,13 @@ DON'T BE SYCOPHANTIC
 Fork of [JackJPowell/uc-intg-broadlink](https://github.com/JackJPowell/uc-intg-broadlink) for the **Unfolded Circle Remote 3**. Python async integration driver on `ucapi` 0.7.0 + `ucapi-framework` + `python-broadlink` 0.19.0.
 
 - **Fork repo:** `mmadalone/uc-intg-broadlink` (public GitHub fork). Local clone: `C:\Users\mique\_Claude Projects\uc-integration-broadlink`. Remotes: `origin` = fork, `upstream` = JackJPowell.
-- **Base:** upstream tag `v1.3.0` (`06d8e6d`, 2026-08-26). Branch `v1.3.0-patched`. Fork version `1.3.0-madalone.2` in `driver.json`; `pyproject.toml` uses the PEP 440 form `1.3.0+madalone.2`. Installed on the Remote: `1.3.0-madalone.2` since 2026-10-21 12:51 UTC (manual upload; madalone.1 had been installed at 09:11 UTC). First fork release: `v1.3.0-madalone.2`, 2026-10-22.
+- **Base:** upstream tag `v1.3.0` (`06d8e6d`, 2026-08-26). Branch `v1.3.0-patched`. Fork version `1.3.0-madalone.3` in `driver.json` (BL-8, not released yet); `pyproject.toml` uses the PEP 440 form `1.3.0+madalone.3`. Installed on the Remote: a `1.3.0-madalone.3` test build since 2026-11-11 20:22 UTC (owner's manual upload; `1.3.0-madalone.2` before, since 2026-10-21 12:51 UTC). `GET /api/intg/drivers` (the list) kept showing the old version after the upload; `GET /api/intg/drivers/broadlink_driver` and the driver's `get_driver_version` showed the new one. First fork release: `v1.3.0-madalone.2`, 2026-10-22.
 - **Devices:** UC Remote 3 at `192.168.2.204`. **The web-configurator PIN is deliberately not recorded here: this file is tracked and public.** Broadlink RM4 mini at `192.168.2.124`.
 - **Sibling fork with the same history and conventions:** `C:\Users\mique\_Claude Projects\integration-kodi-patch` (Kodi). Its CLAUDE.md documents uc-intg-manager, log retrieval and the deploy flow in depth.
 
 ## Patches
 
-`BROADLINK-PATCHES.md` is the source of truth: root causes, BL-1…BL-7, verification, deploy notes. Summary:
+`BROADLINK-PATCHES.md` is the source of truth: root causes, BL-1…BL-8, verification, deploy notes. Summary:
 
 | ID | What |
 |----|------|
@@ -24,6 +24,7 @@ Fork of [JackJPowell/uc-intg-broadlink](https://github.com/JackJPowell/uc-intg-b
 | BL-5 | `repeat` accepts int and str, applied once |
 | BL-6 | CI: no GHCR docker job; tag must match `driver.json`; ARM emulation via `docker/setup-qemu-action` (no apt, no `multiarch/qemu-user-static`) |
 | BL-7 | Fail fast when the Broadlink stops answering. A quick 1 s probe instead of a ~6 s reconnect; no retry within 2 s of a failed attempt, so queued presses can't fire late; background reconnect while awake (5 → 10 → 30 → 60 s), requested by the device when a command gives up; BL-2's 3 s window is a real bound. The normal send path and its 4 s timeout are unchanged |
+| BL-8 | `send_ir` with a code the Remote converts (PRONTO/HEX, Remote API key set): wait for the Broadlink connection (`ensure_connected_for_command`, BL-2/BL-7) before converting, retry a conversion only while the network is down (ENETUNREACH & co., EAI_AGAIN for a host-name address) or the API answers 503, within the 3 s window; a time limit on every attempt (unfurled 0.4.1's conversion request has none); answer failures honestly (503 network/not ready, 500 server error, 401 API key, 400 bad code; was always 400, which the Remote never resends), remember up to 64 converted codes, `Remote(..., wake_if_asleep=False)`. Harness `tests/bl8_harness.py` (in the repo) |
 
 ## Build (Windows Git Bash)
 
@@ -65,6 +66,8 @@ These mirror `.github/workflows/build.yml`.
   - `Device did not answer recently, probing once before sending` (BL-7 quick probe)
   - `Reconnected after N background attempts` (BL-7 background retry)
   - `Cannot send command: device not connected` (gave up)
+  - `IR code conversion failed (…), retrying` (INFO) / `Cannot convert the IR code, answering <status>: …` (WARNING) (BL-8; the `ir_emitter` logger is raised to `UC_LOG_LEVEL` in `driver.py` since BL-8, before that none of its INFO lines reached the log)
+  - A BL-8 wake press that fails usually fails before any conversion: `Cannot send command: device not connected` from `rm`, answered 503
 - Upstream-era baseline (2026-10-17..20): 28 of 128 wakes failed with `[Errno 101] Network is unreachable` and never recovered within the wake.
 - **ucapi 0.7.0 handles each connection's requests one at a time.** `_ws_router` awaits each message before reading the next. A command handler that waits on the device delays every later press, and the standby events too. Keep handler waits short. Harness presses must be awaited in order to model this.
 
@@ -81,7 +84,7 @@ These mirror `.github/workflows/build.yml`.
 git fetch upstream --tags
 git log --oneline v1.3.0..upstream/main   # what upstream has added
 ```
-For a new upstream release: create `vX.Y.Z-patched` from the upstream tag and re-apply BL-1…BL-7. Never rebase a published branch in place. Re-check whether upstream has fixed any of the root causes before re-applying.
+For a new upstream release: create `vX.Y.Z-patched` from the upstream tag and re-apply BL-1…BL-8. Never rebase a published branch in place. Re-check whether upstream has fixed any of the root causes before re-applying.
 
 ## Validation
 

@@ -96,6 +96,136 @@ New log lines:
 
 **Trade-off.** A press within 2 s of a failed attempt fails without trying. If the Broadlink came back in exactly that window, the next press works. During an outage the error comes back without a retry that would have sent the code late.
 
+## BL-8: The press that wakes the Remote, with a code the Remote converts
+
+**Files:** `intg-broadlink/ir_emitter.py`, `intg-broadlink/rm.py`, `intg-broadlink/driver.py`; harness `tests/bl8_harness.py`.
+
+**Problem.** Seen on the owner's Remote (fw 2.12.1, madalone.2) on 2026-11-05 and 2026-11-06: the POWER press that woke the Remote showed a red "Error sending the command … Error code: 400" pop-up, and the TV didn't toggle.
+- The IR emitter's `send_ir` asks the Remote's own REST API (`GET /api/ir/convert/PRONTO|HEX`, through unfurled) to convert PRONTO and HEX codes, when the integration has a Remote API key. Upstream v1.3.0 added this path. It converted first, before any connection check.
+- Right after a wake the Remote's Wi-Fi isn't back yet (root cause 1), so the request failed at once with `[Errno 101] Network is unreachable`, wrapped in unfurled's `ConnectionError`. The driver log of both incidents shows the command arriving ~58 ms after `exit_standby`, and the Broadlink authenticated within ~20 ms of the failure.
+- `command_handler` turned every exception into `400 BAD_REQUEST`, and the press was lost. The Remote's UI resends a failed command after a wake, 0.5 s after each failure while the press is within "Retry commands after wakeup" (2 s by default). It never resends 400, 401, 403, 422 or 501 (`commandRetryPolicy.cpp`, UI 0.84.0). Stock UI 0.84.0 resends only after a wake from SUSPEND; the owner's custom UI (v1.4.19 and later) also after LOW_POWER, the Remote 3's usual standby. Commands from an activity sequence are not resent at all. BL-2's reconnect never ran, because the failure came before `send_command`.
+- Every other conversion failure was a 400 as well (a server error, a rejected API key). A conversion request that got no answer had no time limit at all (see below).
+
+**Fix.**
+- **Wait for the connection before converting.** On a conversion by the Remote that isn't remembered (below), the press first calls `Broadlink.ensure_connected_for_command()`. That is the start of `send_command`, moved into its own method with no change: BL-2's reconnect, or BL-7's quick probe. A connected Broadlink shows that the Remote's network is back. This is what saves the wake press, and the only thing that can save a command from an activity sequence.
+- **Retry a conversion only while the network is down.** Retried 0.5 s apart (`CONVERT_RETRY_INTERVAL`) while the press is inside its 3 s window (`COMMAND_RECONNECT_WINDOW`), for:
+  - `ENETUNREACH`, `ENETDOWN`, `EHOSTUNREACH` or `EADDRNOTAVAIL` anywhere in the exception chain unfurled raises from aiohttp (with an IP address, the case seen on the Remote);
+  - a failed name lookup with `EAI_AGAIN`, for a host-name address (`Remote3-….local`). That is what the glibc resolver in the test container gives without a network. The Remote's own resolver, mDNS for `.local`, was not tested;
+  - the Remote's API answering 503.
+
+  That covers a Broadlink still marked connected from before (no standby seen) while the network is down. A refused connection, a name that doesn't exist, a server error or a time-out is answered at once.
+- **A time limit on every conversion attempt.** The conversion request (`CoreAPI.request` in unfurled 0.4.1) is sent with `timeout=None`, which aiohttp 3.14 takes as "no limit": an explicit `None` becomes `ClientTimeout(total=None)`. So the session's 5 s default never applies to it. A conversion that hung (a slow core, a stale address that drops packets) held the press, and so every later press behind it, until the server or the kernel gave up; madalone.2 was still waiting after 15 s in the harness. Each attempt now gets what is left of the press's window, at least 1 s (`CONVERT_ATTEMPT_MIN_TIMEOUT`).
+- **Honest status codes** (`_conversion_status`):
+
+  | Conversion failure | Answer before | Answer now |
+  |---|---|---|
+  | network unreachable or down, name lookup failed, connection refused (`unfurled.ConnectionError`), a time-out | 400 | 503 |
+  | the Remote answered 503 | 400 | 503 |
+  | the Remote answered another 5xx | 400 | 500 |
+  | API key rejected (`unfurled.AuthenticationError`) | 400 | 401 |
+  | the Remote answered 4xx, invalid timings, an invalid code | 400 | 400 |
+  | a malformed Remote address, a TLS certificate failure (a `ValueError` in the chain) | 400 | 400 |
+
+  The exception chain follows `raise … from …` and implicit contexts, but not a context suppressed with `from None`. Nothing raises out of `command_handler`. A failed conversion is logged as `Cannot convert the IR code, answering <status>: <exception>`, and nothing is sent.
+- **Remembered conversions.** The converted Broadlink data is kept per (format, code) in memory, at most 64 codes (`CONVERTED_CODE_CACHE_SIZE`), least recently used dropped first, and cleared when the driver restarts. A repeated press needs no conversion request, so it works even if the Remote's API is unreachable.
+- **No Wake-on-LAN for a conversion.** `Remote(..., wake_if_asleep=False)`, one `Remote` (and aiohttp session) per press, closed afterwards. unfurled 0.4.1 wakes only once a `Remote` has loaded its settings, which the emitter never does, so this changes nothing today. It keeps it that way if a later unfurled wakes without them.
+- **The IR emitter's log lines reach the Remote's log.** `driver.py` raises only named loggers to `UC_LOG_LEVEL`, and the root logger stays at WARNING. `ir_emitter` wasn't one of them, so its INFO lines never appeared, including upstream's `Got … command request`. It is now raised like the others.
+
+**Log lines:**
+- `IR code conversion failed (…), retrying` (INFO): a conversion retried while the network came back.
+- `Cannot convert the IR code, answering <status>: …` (WARNING): a conversion that failed.
+- The most common failure doesn't come from the emitter: when the Broadlink can't be reached within the window, `rm`'s `Cannot send command: device not connected` is logged, and the press is answered 503 without a conversion.
+
+**Not changed:**
+- codes converted locally (no Remote API key);
+- `send_cmd_sequence`;
+- raw commands;
+- `send_command`'s reconnect.
+
+unfurled stays at 0.4.1. The 0.4.1 and 0.6.3 wheels from PyPI (compared 2026-11-11) have identical `IR.convert`, `CoreAPI.request`, `_raise_on_error`, `Remote._ensure_awake` and exception classes; only other features changed. Upstream pins 0.4.1 too.
+
+**What the 503 buys, and the limits.**
+- The wait for the connection and the conversion retry make the wake press work. The 503 is a better answer, not a rescue. The UI resends only within its window (above), and a 503 after BL-2's 2.5 s usually comes too late, so the Remote shows its "not responding" pop-up (or the error banner, with "Show error pop-ups" off). Only a fast failure, a 500 for example, can still be resent; the API's own 503 is retried until the window ends.
+- **The window bounds when an attempt starts, not when it ends.**
+  - BL-2's last reconnect attempt starts 2.5 s into the press and runs to its end: about 6 s against a Broadlink that doesn't answer (3 s hello + 3 s discovery).
+  - A conversion still gets at least 1 s after a late connection (W19: 3.51 s).
+  - Worst case: a Broadlink that doesn't answer and a network that comes back during the window holds the press about 8.5 s.
+  - Every command has worked this way since BL-2; converted codes, which used to fail at once, now share it.
+- **A long Wi-Fi outage queues presses.** ucapi handles one request at a time, and each converted press now waits up to ~2.5 s for the network, as raw and locally converted codes already did (BL-2). When the network returns, the presses still queued are sent together, several seconds late. One that waited past the core's 10 s answers 408 there and is still sent afterwards. Measured end to end through core-simulator 0.83.2: five presses 0.3 s apart with the network back at 8 s gave three 503s and two sends at 8.04 s. madalone.2 gave five 400s and no send. A fix belongs in `rm.py` for every command, not here.
+- **A remembered code doesn't wait for the network.** W3 (a Broadlink still marked connected) covers codes not yet remembered. A remembered code goes straight to `send_command`. There the send fails with `Errno 101` and BL-7's quick probe fails too, so the press is answered 503 at once, exactly as a raw code is. With the default "Retry commands after wakeup" the UI's resend 0.5 s later succeeds.
+
+### Verification (`tests/bl8_harness.py`, in the repo)
+
+Runs the real `BroadlinkIREmitter.command_handler` and the real `rm.Broadlink`.
+- **python-broadlink is faked.** While the network is down every call fails at once with `Errno 101`; a silent Broadlink blocks until the timeout.
+- **unfurled's `Remote` is faked; successful conversions are fake.** Some failures come from the real unfurled 0.4.1 and aiohttp over real sockets:
+  - the Remote's address in a container without a network gives `ConnectionError <- ClientConnectorError <- OSError [Errno 101]`, checked at the start of every run;
+  - a host name without a network gives `EAI_AGAIN` from the container's resolver;
+  - a closed loopback port (refused);
+  - a port out of range (aiohttp's `InvalidUrlClientError`);
+  - a loopback server that never answers.
+- **Raised directly:** the Remote's HTTP answers (500 / 503 / 400 / 401) as unfurled's own exception classes, and a malformed address from unfurled's real constructor. "Invalid timings" is fake data.
+- **W20 runs the real `Remote`** (session, retries, cancellation, `close()`) against loopback HTTP servers.
+- **Presses are awaited one after the other,** as ucapi handles them. A press still busy after 15 s is reported as "no answer".
+
+```bash
+docker run --rm --network none -v "$(pwd -W)":/w -w /w <python:3.11 image with requirements.txt> python tests/bl8_harness.py intg-broadlink BL-8
+```
+
+The "before" column is the same script on `git archive v1.3.0-madalone.2 intg-broadlink`.
+
+| Scenario | madalone.2 | BL-8 |
+|---|---|---|
+| W1 the press that wakes the Remote, network back at 0.05 / 0.3 / 0.6 / 1 / 2 / 2.4 s | **400 after 0.01 s, nothing sent** (all 6) | 200 after 0.51 / 0.51 / 1.01 / 1.01 / 2.01 / 2.51 s, sent once, one conversion |
+| W2 the same, network back at 2.8 / 3.5 s / never | 400 after 0.01 s | 503 after 2.51 s, nothing sent, no conversion, one background reconnect request (BL-7) |
+| W3 Broadlink still marked connected, a code not yet remembered, network back at 0.3 / 1 / 2 s; 5 s | 400 after 0.01 s | 200 after 0.51 / 1.02 / 2.03 s; 503 after 2.54 s |
+| W12 the press 50 ms after `exit_standby`, the driver's wake retry running, network back at 0.3 / 1 / 2 s | 400 after 0.01 s | 200 after 0.51 / 1.01 / 2.01 s, sent once, one conversion |
+| W16 host-name address, network back at 1 s / never | 400 after 0.01 s | 200 after 1.01 s / 503 after 2.51 s, no conversion |
+| W17 host-name address, Broadlink still marked connected, network back at 1 s | 400 after 0.01 s | 200 after 1.02 s (3 conversion attempts) |
+| W18 the network-down error is one the retry doesn't recognise, network back at 1 s | 400 after 0.01 s | 200 after 1.01 s, one conversion (only the wait for the connection saves it) |
+| W19 the Broadlink connects at 2.5 s, the conversion API never answers | 400 after 0.01 s | 503 after 3.51 s |
+| W14 two presses of the same code in a row on a wake, network back at 1 s | 400, 400 | 200 after 1.01 s, then 200 at once; one conversion |
+| W4 network fine, Broadlink silent | 503 after 6.01 s, one conversion | 503 after 6.01 s, no conversion |
+| W5 the Remote answers 500 / 503 / 400; API key rejected; invalid timings; invalid port; connection refused; server never answers | 400 for all, and **no answer after 15 s** for the last | 500 / 503 (after 2.53 s, retried) / 400 / 401 / 400 / 400 / 503 at once / 503 after 3.00 s; nothing sent, one attempt except the API's 503 |
+| W13 the Remote's API answers 503 once, then converts | 400 | 200 after 0.51 s |
+| W15 malformed Remote address in the configuration | 400 | 400 |
+| W20 real unfurled `Remote`: the API answers 503, 503, then converts / never answers | 400 / **no answer after 15 s** | 200 after 1.01 s, 3 requests / 503 after 3.00 s; no unclosed session |
+| W6 second press of the same code, conversion API unreachable | 400 | 200, no conversion |
+| W7 70 different codes, code 0 used again after the first 64 | nothing remembered | 64 remembered, code 0 kept, code 1 dropped |
+| W8 `repeat` 3 | 3 sent, one conversion | the same |
+| W9 no Remote API key (local conversion) | 200 | the same |
+| W10 `wake_if_asleep` passed | `True` (unfurled's default) | `False` |
+| W11 `send_command` reconnect, network back at 0.6 s / never | 200 after 1.00 s / 503 after 2.51 s | the same |
+
+madalone.2: 8 of 42 as expected; BL-8: 42 of 42.
+
+**Mutation check.** Eight broken copies of BL-8 were run through the harness. It catches seven:
+- skip the wait for the connection: 16 scenarios fail;
+- no time limit;
+- retry every connection error;
+- drop the `EAI_AGAIN` rule;
+- never close the `Remote`;
+- answer network errors with 400;
+- cache under the wrong key.
+
+The eighth survives: walking a context suppressed with `from None`. It only matters with aiohttp's pure-Python HTTP parser; the release bundle ships the compiled one.
+
+**Reviews.** Two independent reviews, the second a multi-agent review with adversarial checks against the real libraries and core-simulator 0.83.2. They found:
+- the missing time limit;
+- the retry of every connection error;
+- the overstated value of the 503;
+- the invisible log lines;
+- the suppressed-context walk;
+- gaps in this harness, including a "time-out" fake the real library never applies and no check that the conversion waits for the connection.
+
+All fixed above, or listed as limits.
+
+**Not modelled:**
+- a name that doesn't exist while the network is up (without a network every lookup in the container fails with `EAI_AGAIN`);
+- the Remote's own `.local` resolver.
+
+The S1–S9, U1–U11 and R1–R2 scripts of BL-1..BL-7 lived outside the repo and are gone. BL-8 changes no driver logic: `driver.py` only gets a log level. `rm.py` only moves the start of `send_command` into `ensure_connected_for_command`. W11, W12 and W14 cover its BL-2 branch and W2 its background-reconnect request; BL-7's quick-probe branch (a press right after an unanswered attempt) isn't re-run.
+
 ---
 
 ## Verification (offline harness, outside the repo)
@@ -165,7 +295,7 @@ Wake behaviour is unchanged. S1–S8 give the same results as madalone.1, except
   - Every non-200 answer fell inside the deliberate unplug test (12:52:21–12:54:23 on 10-21); there were none in normal use.
 - Released as `v1.3.0-madalone.2` on 2026-10-22.
 
-Upstream's `test_pronto_conversion.py` doesn't run on either tree: it is a development script that fails with `IndentationError` at line 68 on pristine v1.3.0. The fork doesn't touch IR conversion. The isort/flake8 findings are identical to pristine upstream, and black reports no changes.
+Upstream's `test_pronto_conversion.py` doesn't run on either tree: it is a development script that fails with `IndentationError` at line 68 on pristine v1.3.0. madalone.2 doesn't touch IR conversion (BL-8 does, see above). The isort/flake8 findings are identical to pristine upstream, and black reports no changes.
 
 ## Deploying
 

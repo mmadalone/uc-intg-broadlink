@@ -39,7 +39,8 @@ DEVICE_TIMEOUT = 4
 # so an unreachable one costs ~6 s per connect attempt instead of ~10 s (was 5 + 5).
 DISCOVERY_TIMEOUT = 3
 # A command that finds the device disconnected keeps reconnecting for this long: the
-# button press that wakes the remote arrives before the remote's Wi-Fi is back.
+# button press that wakes the remote arrives before the remote's Wi-Fi is back. BL-8: the
+# IR emitter's code conversion by the Remote uses the same window.
 COMMAND_RECONNECT_WINDOW = 3.0
 COMMAND_RECONNECT_INTERVAL = 0.5
 # BL-7: once the device has failed to answer (unplugged, off Wi-Fi), a command gets one
@@ -396,27 +397,37 @@ class Broadlink(ExternalClientDevice):
 
         return True
 
+    async def ensure_connected_for_command(self) -> bool:
+        """Make sure the device is connected before a command (BL-2, BL-7).
+
+        Reconnects within COMMAND_RECONNECT_WINDOW (an attempt that starts inside it runs
+        to its end), or probes once if the device has not been answering. BL-8: the IR
+        emitter also calls this before it asks the Remote to convert a code: a connected
+        Broadlink shows that the Remote's own Wi-Fi is back after a wake.
+        """
+        if self.is_connected and self._client:
+            return True
+        if self._unanswered_at is None:
+            # BL-2: reconnect on demand instead of dropping the press.
+            _LOG.info(
+                "[%s] Device not connected, reconnecting before sending",
+                self.log_id,
+            )
+            connected = await self._reconnect_for_command()
+        else:
+            # BL-7: the device has not been answering; don't make the press wait.
+            connected = await self._probe_for_command()
+        if not connected:
+            _LOG.warning("[%s] Cannot send command: device not connected", self.log_id)
+            self._keep_reconnecting()  # BL-7
+        return connected
+
     async def send_command(
         self, predefined_code: str | None = None, code: str | bytes | None = None
     ) -> StatusCodes:
         """Send a command to the Broadlink."""
-        if not self.is_connected or not self._client:
-            if self._unanswered_at is None:
-                # BL-2: reconnect on demand instead of dropping the press.
-                _LOG.info(
-                    "[%s] Device not connected, reconnecting before sending",
-                    self.log_id,
-                )
-                connected = await self._reconnect_for_command()
-            else:
-                # BL-7: the device has not been answering; don't make the press wait.
-                connected = await self._probe_for_command()
-            if not connected:
-                _LOG.warning(
-                    "[%s] Cannot send command: device not connected", self.log_id
-                )
-                self._keep_reconnecting()  # BL-7
-                return StatusCodes.SERVICE_UNAVAILABLE
+        if not await self.ensure_connected_for_command():
+            return StatusCodes.SERVICE_UNAVAILABLE
 
         # Clear media title/artist
         self._state.media_title = ""

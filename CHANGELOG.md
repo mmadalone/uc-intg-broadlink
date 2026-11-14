@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Fixed
+- **The button press that wakes the Remote works with codes the Remote converts (BL-8).** With a Remote API key set, PRONTO and HEX codes are converted by the Remote. The press that woke it asked for that conversion before the Remote's Wi-Fi was back, got "Network is unreachable", and answered `400`, which the Remote never resends: the TV didn't toggle and the Remote showed "Error sending the command".
+  - Now the press waits for the connection to the Broadlink (it keeps trying for up to 3 seconds, as every command has since BL-2) and retries the conversion while the network still isn't up. Commands from an activity sequence, which the Remote never resends, are saved the same way.
+  - A conversion request that gets no answer now has a time limit: what is left of those 3 seconds, at least 1 second. Before, it had none, and every later button press waited behind it.
+  - Conversion failures are answered with what went wrong: `503` when the network or the Remote isn't ready, `500` for a server error, `401` for a rejected API key, `400` only for a code or an address that can't be used.
+  - Converted codes are remembered (up to 64, until the driver restarts), so a repeated press needs no conversion.
+- **The IR emitter's messages reach the Remote's log (BL-8).** Its log level was never set, so only its warnings appeared.
+
+### Changed
+- The code conversion is told never to wake the Remote with Wake-on-LAN (BL-8). With the current conversion library it never did; this keeps it so.
+
+### Known limitations
+- During a long Wi-Fi outage, presses wait for the network one after another, and the ones still waiting when it comes back are sent together, late. Raw and learned codes have behaved this way since BL-2; codes the Remote converts now do too, where they used to fail at once.
+
 ---
 
 ## v1.3.0-madalone.2 - 2026-10-22

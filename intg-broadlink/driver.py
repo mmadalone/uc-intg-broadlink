@@ -32,6 +32,9 @@ async def main():
     logging.getLogger("discover").setLevel(level)
     logging.getLogger("setup").setLevel(level)
     logging.getLogger("broadlink_driver").setLevel(level)
+    # BL-8: the IR emitter's conversion retries (INFO) would otherwise stay below the
+    # root logger's WARNING and never reach the Remote's log.
+    logging.getLogger("ir_emitter").setLevel(level)
 
     driver = BroadlinkDriver(
         device_class=Broadlink,
