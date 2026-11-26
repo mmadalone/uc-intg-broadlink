@@ -5,7 +5,7 @@ Configuration handling of the integration driver.
 :license: Mozilla Public License Version 2.0, see LICENSE for more details.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ucapi_framework import BaseConfigManager
 
@@ -24,8 +24,14 @@ class BroadlinkConfig:
     """List of codes for the device, if any."""
     remote_address: str | None = None
     """Unfolded Circle Remote API address used for IR conversion."""
-    remote_api_key: str | None = None
+    # BL-9: never in a repr (the framework logs the pending config's repr on a setup
+    # error); dataclasses.asdict, which saves the config, still includes it.
+    remote_api_key: str | None = field(default=None, repr=False)
     """API key used to access the Unfolded Circle Remote conversion API."""
+    # BL-9: a user setting, set on the setup page. A configuration saved before BL-9 has
+    # no such field and loads with the default; an older driver ignores it.
+    wake_wait_sec: float = 4.0
+    """How long after the Remote wakes a press may wait for the Remote's Wi-Fi (0-6 s)."""
 
 
 class BroadlinkConfigManager(BaseConfigManager[BroadlinkConfig]):

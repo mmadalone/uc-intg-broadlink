@@ -5,7 +5,6 @@ Remote entity functions.
 """
 
 import asyncio
-import errno
 import logging
 import re
 import socket
@@ -15,7 +14,7 @@ from typing import Any
 import unfurled
 from config_manager import BroadlinkConfig
 from ir_converter import convert_to_broadlink, pulses_to_broadlink_data
-from rm import COMMAND_RECONNECT_WINDOW, Broadlink
+from rm import NETWORK_DOWN_ERRNOS, RETRY_MIN_GAP, Broadlink
 from ucapi import StatusCodes, ir_emitter
 from ucapi.entity import EntityTypes
 from ucapi.media_player import States as MediaStates
@@ -30,18 +29,15 @@ _LOG = logging.getLogger(__name__)
 # BL-8: codes the Remote has converted, so a repeated press needs no network request.
 CONVERTED_CODE_CACHE_SIZE = 64
 # BL-8: a conversion that fails because the Remote's network is not usable yet (right
-# after a wake) is retried at this interval, within the press's COMMAND_RECONNECT_WINDOW.
+# after a wake) is retried at this interval, within the wake window (BL-9: rm's
+# command_deadline(); a press outside it gets one attempt). The last attempt starts when
+# the window ends (rm.RETRY_MIN_GAP).
 CONVERT_RETRY_INTERVAL = 0.5
 # BL-8: unfurled 0.4.1 sends every request without a time limit (it passes timeout=None,
 # which aiohttp takes as "no limit"), so each conversion attempt gets its own: what is
-# left of the press's window, and at least this long. ucapi handles one request at a
+# left of the wake window, and at least this long. ucapi handles one request at a
 # time, so a hanging conversion would hold every later press.
 CONVERT_ATTEMPT_MIN_TIMEOUT = 1.0
-# BL-8: errors that mean the Remote's own network is not usable yet, as right after a
-# wake. Only these are retried; a refused or misdirected request is not.
-_NETWORK_DOWN_ERRNOS = frozenset(
-    {errno.ENETUNREACH, errno.ENETDOWN, errno.EHOSTUNREACH, errno.EADDRNOTAVAIL}
-)
 
 
 def _causes(err: BaseException):
@@ -72,7 +68,7 @@ def _network_down(err: Exception) -> bool:
         if isinstance(cause, socket.gaierror):
             if cause.errno == socket.EAI_AGAIN:
                 return True
-        elif isinstance(cause, OSError) and cause.errno in _NETWORK_DOWN_ERRNOS:
+        elif isinstance(cause, OSError) and cause.errno in NETWORK_DOWN_ERRNOS:
             return True
     return False
 
@@ -266,7 +262,10 @@ class BroadlinkIREmitter(IREmitterEntity):
             return cached
 
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + COMMAND_RECONNECT_WINDOW
+        # BL-9: the conversion is retried only within the wake window (right after a
+        # wake); otherwise it gets one attempt, so presses can't queue up behind it.
+        window = self._device.command_deadline()
+        deadline = window if window is not None else loop.time()
         if not await self._device.ensure_connected_for_command():
             return StatusCodes.SERVICE_UNAVAILABLE
         # Never try Wake-on-LAN (unfurled's default): the command came from the Remote,
@@ -288,12 +287,10 @@ class BroadlinkIREmitter(IREmitterEntity):
                         self._convert_ir_code(remote, code, remote_format), limit
                     )
                 except (unfurled.UnfurledError, TimeoutError, ValueError) as err:
-                    if (
-                        _retry_conversion(err)
-                        and loop.time() + CONVERT_RETRY_INTERVAL < deadline
-                    ):
+                    remaining = deadline - loop.time()
+                    if _retry_conversion(err) and remaining >= RETRY_MIN_GAP:
                         _LOG.info("IR code conversion failed (%s), retrying", err)
-                        await asyncio.sleep(CONVERT_RETRY_INTERVAL)
+                        await asyncio.sleep(min(CONVERT_RETRY_INTERVAL, remaining))
                         continue
                     return self._conversion_failed(err)
                 self._converted[key] = data

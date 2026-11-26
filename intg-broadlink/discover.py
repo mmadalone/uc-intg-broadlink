@@ -20,6 +20,11 @@ class BroadlinkDiscovery(BaseDiscovery):
         :return: List of DiscoveredDevice objects discovered in the local network.
         """
 
+        # BL-9: start each search with an empty list. The driver keeps one discovery
+        # object for as long as it runs, so every search added the Broadlinks again:
+        # the list on "Discovered Devices" grew with each setup, and the setup used the
+        # oldest entry, with the address the Broadlink had then.
+        self._discovered_devices.clear()
         devices = broadlink.discover(timeout=self.timeout)
         for device in devices:
             device.hello()

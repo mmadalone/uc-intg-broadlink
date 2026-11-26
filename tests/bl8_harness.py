@@ -21,6 +21,9 @@ the Remote's address fails like a Remote whose Wi-Fi is down):
     docker run --rm --network none -v "$PWD":/w -w /w <image> python tests/bl8_harness.py <path> [label]
 (<path>: the intg-broadlink folder to test.)
 The path lets the same scenarios run against the code before BL-8 (``git archive``).
+BL-9 changed the time limits: a press waits only within the wake window (4 s by
+default), so W2's slow wakes now succeed and a hanging conversion ends with the
+window; the expectations follow the code under test.
 
 :copyright: (c) 2026 by madalone.
 :license: Mozilla Public License Version 2.0, see LICENSE for more details.
@@ -323,6 +326,12 @@ async def main():
     global NET  # pylint: disable=global-statement
     print(f"== BL-8 harness on {LABEL} (Python {sys.version.split()[0]})")
     bl8 = hasattr(rm.Broadlink, "ensure_connected_for_command")
+    # BL-9: a press waits for the network only until the wake window ends, 4 s by
+    # default and counted from the wake (here: make(), as when the driver starts), with
+    # the last attempt at its end; before BL-9 each press had 3 s of its own (BL-2's
+    # last attempt starts at 2.5 s).
+    bl9 = hasattr(rm.Broadlink, "command_deadline")
+    limit = rm.WAKE_WAIT_DEFAULT + 0.3 if bl9 else 3.6
 
     # The real unfurled must fail exactly as on a waking Remote, or the run is invalid.
     try:
@@ -353,20 +362,28 @@ async def main():
             status == StatusCodes.OK and sent == 1 and converts == 1,
         )
 
-    # W2: the network takes longer than the press's window (BL-2: the last reconnect
-    # attempt starts 2.5 s into the press).
+    # W2: a slow wake. Before BL-9 the network took longer than the press's window
+    # (BL-2: the last reconnect attempt starts 2.5 s into the press); BL-9's 4 s wake
+    # window covers 2.8 and 3.5 s (a wake took 3.08 s on 2026-11-14), and a network
+    # that never comes back still fails within it.
     for up_at in (2.8, 3.5, None):
         status, took, sent, converts, device = await wake_press(up_at)
         background = device.driver.background_requests
+        if bl9 and up_at is not None:
+            ok = status == StatusCodes.OK and sent == 1 and converts == 1
+        else:
+            ok = (
+                status == StatusCodes.SERVICE_UNAVAILABLE
+                and sent == 0
+                and took < limit
+                and converts == 0  # no conversion is attempted without the Broadlink
+                and background == 1  # BL-7: the driver keeps trying in the background
+            )
         report(
             f"W2 wake press, network back at {up_at} s",
             f"{status_name(status)} after {took:.2f} s, sent {sent}, conversions "
             f"{converts}, background reconnect requests {background}",
-            status == StatusCodes.SERVICE_UNAVAILABLE
-            and sent == 0
-            and took < 3.6
-            and converts == 0  # no conversion is attempted without the Broadlink
-            and background == 1,  # BL-7: the driver keeps trying in the background
+            ok,
         )
 
     # W3: Broadlink still marked connected (no standby seen), network down for a while.
@@ -381,7 +398,7 @@ async def main():
     report(
         "W3 stale connection, network back at 5 s",
         f"{status_name(status)} after {took:.2f} s, sent {sent}, conversions {converts}",
-        status == StatusCodes.SERVICE_UNAVAILABLE and sent == 0 and took < 3.6,
+        status == StatusCodes.SERVICE_UNAVAILABLE and sent == 0 and took < limit,
     )
 
     # W12: the driver's wake retry (BL-1, an attempt every 0.5 s) runs alongside the press.
@@ -440,7 +457,7 @@ async def main():
             f"W5 conversion error {mode}",
             f"{status_name(status)} after {took:.2f} s, sent {len(NET.sent)}, "
             f"conversions {NET.converts}",
-            status == want and not NET.sent and took < 3.6
+            status == want and not NET.sent and took < limit
             # only a network that is down, or the API's own 503, is worth retrying
             and (NET.converts == 1 or mode == "http503"),
         )
@@ -525,7 +542,10 @@ async def main():
         "W19 late connection (network back at 2.4 s), conversion API never answers",
         f"{status_name(status)} after {took:.2f} s, sent {len(NET.sent)}, "
         f"conversions {NET.converts}",
-        status == StatusCodes.SERVICE_UNAVAILABLE and not NET.sent and took < 4.1,
+        # a conversion still gets 1 s after a late connection; BL-9: within the window
+        status == StatusCodes.SERVICE_UNAVAILABLE
+        and not NET.sent
+        and took < max(limit, 4.1),
     )
 
     # W20: end to end through the REAL unfurled Remote (not the fake): one session, a
@@ -585,7 +605,7 @@ async def main():
             status == want
             and len(NET.sent) == (1 if want == StatusCodes.OK else 0)
             and not unclosed
-            and took < 3.6,
+            and took < limit,
         )
 
     # W14: two presses of the same code in a row on a wake (ucapi handles them one at a
@@ -706,7 +726,7 @@ async def main():
         f"== {LABEL}: {len(RESULTS) - len(failed)}/{len(RESULTS)} as expected"
         + (f"; not as expected: {', '.join(failed)}" if failed else "")
     )
-    print(f"== BL-8 code present: {bl8}")
+    print(f"== BL-8 code present: {bl8}; BL-9 code present: {bl9}")
     server.close()
 
 

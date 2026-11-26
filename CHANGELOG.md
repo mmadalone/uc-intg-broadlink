@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+Button presses made while the Remote's Wi-Fi is down are no longer sent late, and a new setting controls how long the press that wakes the Remote may wait for its Wi-Fi (BL-9). Details and evidence are in [BROADLINK-PATCHES.md](BROADLINK-PATCHES.md). "Configure" below is the integration's setup wizard: in the web configurator, Integrations → Broadlink → Start setup → Start integration setup, then the action (Update, Backup, Restore).
+
+### Fixed
+- **Presses made while the Remote's Wi-Fi is down are no longer sent late (BL-9).** The integration handles one press at a time. During a Wi-Fi outage each press waited for the network in turn, and the ones still waiting when it came back were all sent at once, seconds late; a late burst of power toggles can leave a TV off. Now a press waits for the Wi-Fi only in a short window right after the Remote wakes. At any other time it gets its error at once and is never sent later.
+- **A slow wake no longer loses the press that woke the Remote (BL-9).** That press now waits up to 4 seconds from the wake for the Remote's Wi-Fi; before, the last try was at about 2.5 seconds. On 2026-11-14 the Wi-Fi took 3.1 seconds to come back.
+- **Updating the Broadlink in the integration's settings no longer erases the IR codes learned in the integration (BL-9).** Configure → Update saved the device with an empty code list.
+- **Configure → Update works after a cancelled setup (BL-9).** After a setup was cancelled or left to expire, the next Configure went back to the unfinished "Remote API access" page, whichever action was chosen. An Add after an Update that ended without being cancelled (a lost connection, say) could also delete the Broadlink being updated.
+- **A Broadlink that can't be reached when it is added, updated or restored keeps being retried while the Remote is awake (BL-9),** instead of only at the next wake: at first every half second, later up to once a minute.
+- **The Broadlink is listed once on "Discovered Devices" (BL-9).** Every search for devices added it to the list again until the integration restarted, and the setup used the oldest entry, so after the Broadlink's IP address changed an Update could save the old address.
+- **Configure → Restore applies at once (BL-9).** The restored settings reached the running Broadlink only after the integration restarted, and if the Broadlink's IP address changed before that, the old settings, learned codes included, were written back over the restored ones.
+- **The Remote PIN and the Remote API key no longer appear in the integration's log (BL-9).** The PIN was written there in plain text whenever it was typed on the setup page, and the API key, which gives admin access to the Remote, whenever Configure → Backup or Restore was used.
+- **A command that fails and can't reconnect is answered "unavailable" again (BL-9).** In one rare case the integration resent it through a connection that never finished setting up and answered with a server error.
+
+### Added
+- **A setting** on the integration's "Remote API access" setup page (web configurator: Integrations → Broadlink → Configure → Update): "Wait for Wi-Fi after a wake", picked from a list: 0 to 6 seconds, default 4.
+
+### Changed
+- On Update, the Remote PIN can be left empty to keep the current access to the Remote's API, unless you pick another Remote. Adding a Broadlink still needs the PIN. If a request for new access failed partway, the PIN is asked for again until new access is made.
+- Configure → Restore reconnects the Broadlink, as Update does.
+
+### Known limitations
+- Presses made right after the press that woke the Remote, while its Wi-Fi is still coming back, are sent one after another once it connects, as before: the first up to the wake wait (4 seconds by default) plus about 1.5 seconds after the wake, each one after it a tenth to a quarter of a second later. A burst of presses is replayed in full, and POWER pressed twice there toggles twice.
+- About one wake in 80, the press that wakes the Remote reaches the integration just before the Remote's wake event. With the Wi-Fi still down, it gets an error at once and is never sent late; the Remote's "Retry commands after wakeup", if on, resends it.
+- With several Broadlinks on one Remote, setting up access for one removes the others' access (one key name, as upstream): enter the PIN on each Update.
+- With "Wait for Wi-Fi after a wake" at 5 or 6 seconds, a wake press that connects late and whose send then gets no answer can be resent after the Remote has given up on it, and the presses made behind it too.
+- If the Remote goes back to standby within seconds of a wake, while the press that woke it is still waiting for the Wi-Fi, and then wakes again, the presses made behind that press can wait twice and, at 5 or 6 seconds, be sent after the Remote has given up on them.
+- After adding a Broadlink that couldn't be reached at that moment, its IR emitter may stay unavailable until the integration restarts.
+- A button pressed during the second in which a Restore is being applied gets an error and is not sent.
+- If the Wi-Fi takes longer than the wake wait (4 seconds by default), the press that woke the Remote, and the presses made behind it, fail with an error. A longer "Wait for Wi-Fi after a wake" moves this edge, and so does the Remote's own "Retry commands after wakeup" set to 5 seconds or more, which resends the press after its error.
+
+### Tested on a Remote 3 so far
+- **Three days of normal use on the previous test build** (firmware 2.12.1), whose wake handling is the same: 54 wakes and 1,052 commands, all answered OK. 9 presses found the Broadlink still disconnected just after a wake; each reconnected within the wake wait and was sent.
+- **The setup page on this build:** two Updates with the new list. The page appeared, 5 seconds was saved with the Remote PIN left empty, the Broadlink was listed once, and presses afterwards were sent.
+- Not run on the Remote yet: a Wi-Fi outage while the Remote is awake, and an unplugged Broadlink. The offline scenario tests cover both.
+
 ---
 
 ## v1.3.0-madalone.3 - 2026-11-14

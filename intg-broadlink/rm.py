@@ -4,13 +4,18 @@ This module implements the broadlink communication of the Remote Two/3 integrati
 """
 
 import asyncio
+import errno
 import logging
+import math
+import time
 from asyncio import AbstractEventLoop
 from base64 import b64decode, b64encode
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import broadlink
+from broadlink.const import DEFAULT_RETRY_INTVL
 from broadlink.exceptions import (
     BroadlinkException,
     NetworkTimeoutError,
@@ -38,11 +43,36 @@ DEVICE_TIMEOUT = 4
 # Directed hello, then broadcast discovery: a device on the LAN answers in milliseconds,
 # so an unreachable one costs ~6 s per connect attempt instead of ~10 s (was 5 + 5).
 DISCOVERY_TIMEOUT = 3
-# A command that finds the device disconnected keeps reconnecting for this long: the
-# button press that wakes the remote arrives before the remote's Wi-Fi is back. BL-8: the
-# IR emitter's code conversion by the Remote uses the same window.
-COMMAND_RECONNECT_WINDOW = 3.0
+# BL-2: a press that waits for the connection retries this often. BL-9: how long it may
+# wait is set by the wake window below.
 COMMAND_RECONNECT_INTERVAL = 0.5
+# BL-9: a press may wait for the remote's Wi-Fi only inside the wake window, which
+# starts at the first wake event of a wake (exit_standby or the core's connect; see
+# broadlink_driver.py) or when the device is created, ends at enter_standby, and is
+# counted from that moment, never from when a press is handled (see
+# command_deadline()). ucapi handles requests one at a time and says nothing about when
+# a request was made, so a wait per press made presses queue during an outage and fire
+# together, late, when it ended; every press handled inside the wake window shares its
+# end. Outside it, a press whose Wi-Fi is down fails at once and is never sent later
+# (UC's IR emitter spec: don't queue, send new IR commands within 1 s). The wake wait is
+# a user setting (BroadlinkConfig, setup page): default 4 s, because the remote's Wi-Fi
+# took 3.08 s to come back after a wake on 2026-11-14. At most 6 s: the core answers 408
+# after 10 s without telling the driver, and a press still needs time to connect,
+# convert and send its code after the wait. A press's last attempt can connect up to
+# PRESS_HELLO_TIMEOUT after the window ends. BL-8's code conversion by the Remote uses
+# the same window.
+WAKE_WAIT_DEFAULT = 4.0
+WAKE_WAIT_MAX = 6.0
+# BL-9: a press retries every COMMAND_RECONNECT_INTERVAL, and its last attempt starts
+# when the window ends, so it waits as long as the setting says. No attempt closer than
+# this to the one before.
+RETRY_MIN_GAP = 0.05
+# BL-9: the directed hello of a press's own attempt when the device is not known to be
+# silent (in the wake window, and the one attempt outside it), without discovery (the
+# driver's retries have it), so an attempt started near the end of the window can't run
+# ~6 s past it. Long enough to hear python-broadlink's resend after 1 s: 7 of the 39
+# first hellos after a wake on 2026-11-11..14 were answered only after 0.94-1.05 s.
+PRESS_HELLO_TIMEOUT = 1.4
 # BL-7: once the device has failed to answer (unplugged, off Wi-Fi), a command gets one
 # short directed hello, without discovery, instead of the window above. ucapi handles
 # requests one at a time, so every second a press waits also delays the presses queued
@@ -54,6 +84,27 @@ PROBE_HOLDOFF = 2.0
 # How long a press waits for a connect attempt that is already running (the driver's
 # background retry) before giving up.
 PROBE_LOCK_WAIT = 1.0
+# BL-8, BL-9: errors that mean the remote's own network is not usable yet, as right after
+# a wake. python-broadlink raises them as plain OSErrors.
+NETWORK_DOWN_ERRNOS = frozenset(
+    {errno.ENETUNREACH, errno.ENETDOWN, errno.EHOSTUNREACH, errno.EADDRNOTAVAIL}
+)
+
+
+def wait_setting(value: Any, default: float, maximum: float) -> float:
+    """Return a BL-9 wait setting in seconds: a number, clamped to 0..maximum.
+
+    A value that isn't a finite number (text, NaN, infinity, or a number too large for
+    a float: a hand-edited config.json) gives ``default``, as setup.py's _wait_seconds
+    does.
+    """
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    if not math.isfinite(seconds):
+        return default
+    return min(max(seconds, 0.0), maximum)
 
 
 @dataclass
@@ -92,10 +143,24 @@ class Broadlink(ExternalClientDevice):
         self._connect_lock = asyncio.Lock()
         self._io_lock = asyncio.Lock()
         # BL-7: loop time of the last attempt the device did not answer (None: it
-        # answered, or hasn't been tried since the remote woke), and whether
-        # create_client() makes a quick probe instead of a full connect.
+        # answered, or hasn't been tried since the remote woke), and the directed hello's
+        # time limit when create_client() makes a hello-only attempt (BL-7's quick probe,
+        # BL-9's attempts in the wake window) instead of a full connect (None).
         self._unanswered_at: float | None = None
-        self._quick_probe = False
+        self._hello_only: float | None = None
+        # BL-9: loop time the wake window started: the remote woke up or connected, or
+        # the driver started. Presses inside the window may wait for the remote's Wi-Fi.
+        self._woke_at = self._loop.time()
+        # BL-9: False from enter_standby until the next wake event: a press handled in
+        # standby is outside every window, even within the wake wait of the last wake.
+        self._window_open = True
+        # BL-9: when the last send started (loop time, stamped in the worker thread).
+        self._send_started: float | None = None
+        _LOG.info(
+            "[%s] Wait for the remote's Wi-Fi: up to %.1fs after a wake",
+            self.log_id,
+            self._wake_wait(),
+        )
 
     @property
     def identifier(self) -> str:
@@ -139,30 +204,51 @@ class Broadlink(ExternalClientDevice):
                 return True
             return await super().connect()
 
-    async def _reconnect_for_command(self) -> bool:
-        """Reconnect for a command, retrying for up to COMMAND_RECONNECT_WINDOW (BL-2).
+    async def _reconnect_for_command(self, deadline: float) -> bool:
+        """Reconnect for a command, retrying until ``deadline`` (BL-2, BL-9).
 
-        If a connect attempt is already running (the driver's wake retry), its result
-        is awaited first instead of queueing another attempt behind it, but not past
-        the window (BL-7): against a device that doesn't answer it takes ~6 s. Once an
-        attempt has found the device silent, the press switches to the quick probe.
+        ``deadline`` is the end of the wake window. If a connect attempt is
+        already running (the driver's wake retry), its result is awaited instead of
+        queueing another attempt behind it, until the window ends: right after a wake
+        the driver's retry runs in step with the press, and its attempt often connects
+        just after the press would otherwise have given up. Against a Broadlink that
+        doesn't answer that attempt takes ~6 s, so the press then gets its error when
+        the window ends (BL-7 gave up after 3 s). Once an attempt has found the device
+        silent, the press switches to BL-7's quick probe. The press's own attempts are
+        directed hellos without discovery (the driver's retry has it) that listen until
+        the window ends, at least PRESS_HELLO_TIMEOUT and at most DISCOVERY_TIMEOUT, so
+        one started near the end can't run ~6 s past it, and one lost reply
+        (python-broadlink resends after 1 s) can't end the wait. The last attempt starts
+        at the window's end (RETRY_MIN_GAP).
         """
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + COMMAND_RECONNECT_WINDOW
-        while loop.time() < deadline:
+        while True:
             if self._unanswered_at is not None:
                 return await self._probe_for_command()
             if self._connect_lock.locked():
                 if not await self._wait_for_attempt(deadline - loop.time()):
+                    _LOG.info(
+                        "[%s] Gave up waiting for a connect attempt (%s)",
+                        self.log_id,
+                        self._since_wake(),
+                    )
                     return False
                 if self.is_connected and self._client:
                     return True
-            elif await self.connect() and self._client:
+            elif (
+                await self._quick_attempt(
+                    max(
+                        PRESS_HELLO_TIMEOUT,
+                        min(DISCOVERY_TIMEOUT, deadline - loop.time()),
+                    )
+                )
+                and self._client
+            ):
                 return True
-            if loop.time() + COMMAND_RECONNECT_INTERVAL > deadline:
-                break
-            await asyncio.sleep(COMMAND_RECONNECT_INTERVAL)
-        return False
+            remaining = deadline - loop.time()
+            if remaining < RETRY_MIN_GAP:
+                return False
+            await asyncio.sleep(min(COMMAND_RECONNECT_INTERVAL, remaining))
 
     async def _wait_for_attempt(self, timeout: float) -> bool:
         """Wait up to ``timeout`` seconds for the connect attempt in progress (BL-7)."""
@@ -181,6 +267,62 @@ class Broadlink(ExternalClientDevice):
         fail fast.
         """
         self._unanswered_at = None
+
+    def note_wake(self) -> None:
+        """Start the wake window (BL-9).
+
+        The driver calls this when the remote wakes up or connects; creating the device
+        (the driver starting) starts one too. For the wake wait after it, a press that
+        finds the device disconnected waits for the remote's Wi-Fi. ucapi runs the
+        driver's listeners only between requests, so the window can't move while a
+        press is handled.
+        """
+        self._woke_at = self._loop.time()
+        self._window_open = True
+
+    def note_standby(self) -> None:
+        """End the wake window: the remote went to standby (BL-9).
+
+        The driver calls this as ucapi handles enter_standby. A press handled before
+        the next wake event (one that reached the driver before exit_standby, or a
+        command sent while the remote sleeps) is outside every window, even within the
+        wake wait of the last wake: a wake forced back to sleep at once must not lend
+        its window to the next one, whose exit_standby would then start a second.
+        """
+        self._window_open = False
+
+    def _wake_wait(self) -> float:
+        """Return the wake wait setting in seconds (BL-9)."""
+        return wait_setting(
+            getattr(self._device_config, "wake_wait_sec", WAKE_WAIT_DEFAULT),
+            WAKE_WAIT_DEFAULT,
+            WAKE_WAIT_MAX,
+        )
+
+    def _since_wake(self) -> str:
+        """Return how long ago the remote woke, for the log (BL-9)."""
+        return (
+            f"{asyncio.get_running_loop().time() - self._woke_at:.1f}s after the wake"
+        )
+
+    def command_deadline(self) -> float | None:
+        """Return the end of the wake window, or None once it has passed (BL-9).
+
+        Right after a wake a press arrives before the remote's Wi-Fi is back, so it may
+        wait for the network until the wake window ends. At other times a press makes
+        one quick attempt: while the network is down every press would otherwise wait
+        in turn (ucapi handles them one at a time), and those still queued would all be
+        sent once it came back. ucapi doesn't say when a press was made, so a press
+        that queued during a slow wake and is handled after the window fails at once.
+        The setting is read here, so a change on the setup page applies at once.
+        Standby ends the window (note_standby).
+        """
+        if not self._window_open:
+            return None
+        deadline = self._woke_at + self._wake_wait()
+        if asyncio.get_running_loop().time() < deadline:
+            return deadline
+        return None
 
     def _note_unanswered(self) -> None:
         """Record that the device did not answer while the network was usable (BL-7)."""
@@ -201,7 +343,8 @@ class Broadlink(ExternalClientDevice):
 
         One quick probe at most, and none within PROBE_HOLDOFF of the last unanswered
         attempt. A connect attempt that is already running (the driver's background
-        retry, ~6 s against a silent device) is waited for only briefly.
+        retry, ~6 s against a silent device) is waited for only briefly. BL-9: also a
+        press outside the wake window that finds the device disconnected.
         """
         loop = asyncio.get_running_loop()
         since = self._unanswered_at
@@ -223,35 +366,62 @@ class Broadlink(ExternalClientDevice):
             since = self._unanswered_at
             if since is not None and loop.time() - since < PROBE_HOLDOFF:
                 return False  # the attempt we waited for has just failed
-            _LOG.info(
-                "[%s] Device did not answer recently, probing once before sending",
-                self.log_id,
-            )
-            return await self._quick_connect() and self._client is not None
+            if since is None:
+                # BL-9: a press outside the wake window (its caller has logged why); the
+                # device is not known to be silent, so a hello that hears the resend.
+                hello_timeout = PRESS_HELLO_TIMEOUT
+            else:
+                hello_timeout = QUICK_PROBE_TIMEOUT
+                _LOG.info(
+                    "[%s] Device did not answer recently, probing once before sending",
+                    self.log_id,
+                )
+            return await self._quick_connect(hello_timeout) and self._client is not None
         finally:
             self._connect_lock.release()
 
-    async def _reconnect_after_failed_send(self) -> bool:
+    async def _reconnect_after_failed_send(
+        self, err: Exception, started: float
+    ) -> bool:
         """Reconnect once after a send went unanswered (BL-7).
 
         A quick probe instead of a full connect. If the device has stopped answering
         this fails within a second, and the driver keeps retrying in the background.
+        BL-9: a send that failed because the remote's own network is down, on its first
+        packet (``started``: when python-broadlink began the send; it resends only after
+        a 1 s receive timeout), waits for the network inside the wake window, like a
+        press that found the device disconnected. Nothing went out, so the resend can't
+        send the code twice. A failure after that second may follow a packet that went
+        out, so it gets the quick probe and is never resent late.
         """
+        loop = asyncio.get_running_loop()
+        if (
+            isinstance(err, OSError)
+            and err.errno in NETWORK_DOWN_ERRNOS
+            and loop.time() - started < DEFAULT_RETRY_INTVL
+        ):
+            deadline = self.command_deadline()
+            if deadline is not None:
+                return await self._reconnect_for_command(deadline)
+        return await self._quick_attempt()
+
+    async def _quick_attempt(self, hello_timeout: float = QUICK_PROBE_TIMEOUT) -> bool:
+        """Make one hello-only connect attempt, unless the device is connected (BL-7)."""
         async with self._connect_lock:
             if self.is_connected:
                 return True
-            return await self._quick_connect()
+            return await self._quick_connect(hello_timeout)
 
-    async def _quick_connect(self) -> bool:
-        """Connect with one short directed hello and no discovery (BL-7).
+    async def _quick_connect(self, hello_timeout: float = QUICK_PROBE_TIMEOUT) -> bool:
+        """Connect with one directed hello and no discovery (BL-7, BL-9).
 
         The caller holds ``_connect_lock``.
         """
-        self._quick_probe = True
+        self._hello_only = hello_timeout
         try:
             return await super().connect()
         finally:
-            self._quick_probe = False
+            self._hello_only = None
 
     async def _run_io(self, func, *args, **kwargs):
         """Run a blocking python-broadlink call off the event loop (BL-2).
@@ -277,7 +447,7 @@ class Broadlink(ExternalClientDevice):
             self.address,
         )
 
-        hello_timeout = QUICK_PROBE_TIMEOUT if self._quick_probe else DISCOVERY_TIMEOUT
+        hello_timeout = self._hello_only or DISCOVERY_TIMEOUT
         # Try connecting to stored IP address first
         try:
             device = await self._run_io(
@@ -289,7 +459,7 @@ class Broadlink(ExternalClientDevice):
                 device.timeout = DEVICE_TIMEOUT
                 return device
         except Exception as ip_err:
-            if self._quick_probe:
+            if self._hello_only is not None:
                 # BL-7: no discovery fallback; the driver's background retry has one.
                 if isinstance(ip_err, NetworkTimeoutError):
                     self._note_unanswered()
@@ -398,29 +568,65 @@ class Broadlink(ExternalClientDevice):
         return True
 
     async def ensure_connected_for_command(self) -> bool:
-        """Make sure the device is connected before a command (BL-2, BL-7).
+        """Make sure the device is connected before a command (BL-2, BL-7, BL-9).
 
-        Reconnects within COMMAND_RECONNECT_WINDOW (an attempt that starts inside it runs
-        to its end), or probes once if the device has not been answering. BL-8: the IR
-        emitter also calls this before it asks the Remote to convert a code: a connected
-        Broadlink shows that the Remote's own Wi-Fi is back after a wake.
+        Inside the wake window, reconnects until it ends; otherwise, or if the device
+        has not been answering, probes once. BL-8: the IR emitter also calls this
+        before it asks the Remote to convert a code: a connected Broadlink shows that
+        the Remote's own Wi-Fi is back.
         """
         if self.is_connected and self._client:
             return True
-        if self._unanswered_at is None:
-            # BL-2: reconnect on demand instead of dropping the press.
-            _LOG.info(
-                "[%s] Device not connected, reconnecting before sending",
-                self.log_id,
-            )
-            connected = await self._reconnect_for_command()
-        else:
+        deadline = self.command_deadline()
+        if self._unanswered_at is not None:
             # BL-7: the device has not been answering; don't make the press wait.
             connected = await self._probe_for_command()
+        elif deadline is not None:
+            # BL-2: reconnect on demand instead of dropping the press.
+            _LOG.info(
+                "[%s] Device not connected, reconnecting before sending (%s)",
+                self.log_id,
+                self._since_wake(),
+            )
+            connected = await self._reconnect_for_command(deadline)
+        else:
+            # BL-9: outside the wake window, don't wait for the network: presses made
+            # during an outage fail at once instead of being sent late.
+            _LOG.info(
+                "[%s] Device not connected, trying once before sending (%s)",
+                self.log_id,
+                self._since_wake(),
+            )
+            connected = await self._probe_for_command()
         if not connected:
-            _LOG.warning("[%s] Cannot send command: device not connected", self.log_id)
+            _LOG.warning(
+                "[%s] Cannot send command: device not connected (%s)",
+                self.log_id,
+                self._since_wake(),
+            )
             self._keep_reconnecting()  # BL-7
         return connected
+
+    async def _send_data(self, data: bytes) -> None:
+        """Send data with python-broadlink, noting when the call began (BL-9).
+
+        The start is stamped in the worker thread, so the wait for _io_lock and for the
+        thread doesn't count: _reconnect_after_failed_send uses it to tell that the
+        first packet failed and nothing went out.
+        """
+        send_data = self._client.send_data  # type: ignore[union-attr]
+        self._send_started = None
+
+        def call() -> None:
+            self._send_started = time.monotonic()  # the loop's clock (asyncio)
+            send_data(data)
+
+        await self._run_io(call)
+
+    def _send_start(self) -> float:
+        """Return when the last send began, or now if it never started (BL-9)."""
+        started = self._send_started
+        return started if started is not None else asyncio.get_running_loop().time()
 
     async def send_command(
         self, predefined_code: str | None = None, code: str | bytes | None = None
@@ -446,11 +652,12 @@ class Broadlink(ExternalClientDevice):
             try:
                 decode = b64decode(code_data)
                 if self._client:
-                    await self._run_io(self._client.send_data, decode)  # type: ignore[attr-defined]
+                    await self._send_data(decode)  # BL-9: notes when the send began
                     self.emit(device, command, "Sent")
                     return StatusCodes.OK
                 return StatusCodes.SERVER_ERROR
             except (BroadlinkException, OSError) as err:
+                started = self._send_start()  # BL-9
                 _LOG.warning(
                     "[%s] Command failed, attempting reconnect: %s",
                     self.log_id,
@@ -458,11 +665,14 @@ class Broadlink(ExternalClientDevice):
                 )
                 # Force reconnection
                 await self.disconnect()
-                await self._reconnect_after_failed_send()  # BL-7: a quick probe
+                # BL-7: a quick probe; BL-9: a first-packet network-down failure inside
+                # the wake window waits for the network. Resend only if that connected:
+                # a failed attempt can leave a client that never authenticated.
+                reconnected = await self._reconnect_after_failed_send(err, started)
 
                 # Retry once
                 try:
-                    if self._client:
+                    if reconnected and self._client:
                         decode = b64decode(code_data)
                         await self._run_io(self._client.send_data, decode)  # type: ignore[attr-defined]
                         self.emit(device, command, "Sent (after reconnect)")
@@ -496,9 +706,10 @@ class Broadlink(ExternalClientDevice):
                 return StatusCodes.SERVICE_UNAVAILABLE
 
             try:
-                await self._run_io(self._client.send_data, code)  # type: ignore[attr-defined]
+                await self._send_data(code)  # BL-9: notes when the send began
                 return StatusCodes.OK
             except (BroadlinkException, OSError) as err:
+                started = self._send_start()  # BL-9
                 _LOG.warning(
                     "[%s] Custom command failed, attempting reconnect: %s",
                     self.log_id,
@@ -506,10 +717,13 @@ class Broadlink(ExternalClientDevice):
                 )
                 # Force reconnection and retry
                 await self.disconnect()
-                await self._reconnect_after_failed_send()  # BL-7: a quick probe
+                # BL-7: a quick probe; BL-9: a first-packet network-down failure inside
+                # the wake window waits for the network. Resend only if that connected:
+                # a failed attempt can leave a client that never authenticated.
+                reconnected = await self._reconnect_after_failed_send(err, started)
 
                 try:
-                    if self._client:
+                    if reconnected and self._client:
                         await self._run_io(self._client.send_data, code)  # type: ignore[attr-defined]
                         return StatusCodes.OK
                 except Exception as retry_err:

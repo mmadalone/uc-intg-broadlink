@@ -9,6 +9,7 @@ import asyncio
 import logging
 import os
 
+import log_redact
 from broadlink_driver import BroadlinkDriver
 from discover import BroadlinkDiscovery
 from ir_emitter import BroadlinkIREmitter
@@ -24,6 +25,8 @@ from config_manager import BroadlinkConfig, BroadlinkConfigManager
 async def main():
     """Start the Remote Two integration driver."""
     logging.basicConfig()
+    # BL-9: mask the Remote API key and the PIN in every log line (log_redact.py).
+    log_redact.install()
 
     level = os.getenv("UC_LOG_LEVEL", "DEBUG").upper()
     logging.getLogger("rm").setLevel(level)
