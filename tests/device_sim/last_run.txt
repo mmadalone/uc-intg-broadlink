@@ -1,0 +1,65 @@
+## Driver is up: broadlink_driver, version: 1.3.0-madalone.5, api: 0.7.0, listening on: 127.0.0.1:9090 (after 10 half-seconds)
+  3960.85 CLIENT entities [('media_player.a0b1c2d3e4f5', 'media_player'), ('remote.a0b1c2d3e4f5', 'remote'), ('ir_emitter.a0b1c2d3e4f5', 'ir_emitter')]
+  3960.85 CLIENT the Remote is awake; waiting 10 s (past the wake wait)
+  3971.92 CLIENT press P0 awake, Wi-Fi up: answered 200 after 0.01 s; IR sends 1
+ok   P0 a press while all is well is sent: 200, 0.01 s, 1 sent
+  3971.92 CLIENT ===== TEST 2: Wi-Fi outage while awake =====
+  3971.93 CLIENT Remote Wi-Fi DOWN (blocked)
+  3971.94 CLIENT press T2.1 during the outage: answered 503 after 0.02 s; IR sends 0
+ok   T2.1 an error, within 2 s, nothing sent: 503 after 0.02 s, 0 sent
+  3974.94 CLIENT press T2.2 during the outage: answered 503 after 0.01 s; IR sends 0
+ok   T2.2 an error, within 2 s, nothing sent: 503 after 0.01 s, 0 sent
+  3977.94 CLIENT press T2.3 during the outage: answered 503 after 0.01 s; IR sends 0
+ok   T2.3 an error, within 2 s, nothing sent: 503 after 0.01 s, 0 sent
+  3980.94 CLIENT press T2.4 during the outage: answered 503 after 0.01 s; IR sends 0
+ok   T2.4 an error, within 2 s, nothing sent: 503 after 0.01 s, 0 sent
+  3986.93 CLIENT Remote Wi-Fi UP
+ok   T2.5 nothing sent late after the Wi-Fi came back: 0 IR sends in the 8 s after
+  3994.94 CLIENT press T2.6 after the Wi-Fi is back: answered 200 after 0.01 s; IR sends 1
+ok   T2.6 a press afterwards works: 200 after 0.01 s, 1 sent
+  3994.94 CLIENT ===== TEST 3: Broadlink unplugged =====
+  3998.32 CLIENT Broadlink UNPLUGGED
+  4003.34 CLIENT press T3.1 Broadlink unplugged: answered 503 after 2.30 s; IR sends 0
+ok   T3.1 an error, nothing sent: 503 after 2.30 s, 0 sent
+  4007.35 CLIENT press T3.2 still unplugged: answered 503 after 1.01 s; IR sends 0
+ok   T3.2 an error, nothing sent: 503 after 1.01 s, 0 sent
+  4012.36 CLIENT Broadlink PLUGGED IN
+ok   T3.3 nothing sent late after plugging it back in: 0 IR sends in the 15 s after
+  4027.37 CLIENT press T3.4 after plugging it back in: answered 200 after 0.01 s; IR sends 1
+ok   T3.4 a press afterwards works: 200 after 0.01 s, 1 sent
+  4027.38 CLIENT press T3.5 one more: answered 200 after 0.01 s; IR sends 1
+ok   T3.5 and the next one too: 200 after 0.01 s, 1 sent
+== 12/12 as expected
+## ---- driver log (warnings and BL-9 lines)
+INFO:rm:[RM4 mini] Wait for the remote's Wi-Fi: up to 5.0s after a wake
+DEBUG:rm:[RM4 mini] Device authenticated and ready
+WARNING:rm:[RM4 mini] Custom command failed, attempting reconnect: [Errno 101] Network is unreachable
+ERROR:ucapi_framework.device:[RM4 mini] Connection error: [Errno 101] Network is unreachable
+ERROR:ucapi_framework.driver:[a0b1c2d3e4f5] Connection error: [Errno 101] Network is unreachable
+INFO:rm:[RM4 mini] Device not connected, trying once before sending (13.1s after the wake)
+ERROR:ucapi_framework.device:[RM4 mini] Connection error: [Errno 101] Network is unreachable
+WARNING:rm:[RM4 mini] Cannot send command: device not connected (13.1s after the wake)
+ERROR:ucapi_framework.driver:[a0b1c2d3e4f5] Connection error: [Errno 101] Network is unreachable
+WARNING:rm:[RM4 mini] Failed to connect to stored IP 192.0.2.10: [Errno 101] Network is unreachable. Trying discovery...
+ERROR:ucapi_framework.device:[RM4 mini] Connection error: [Errno 101] Network is unreachable
+ERROR:ucapi_framework.driver:[a0b1c2d3e4f5] Connection error: [Errno 101] Network is unreachable
+INFO:rm:[RM4 mini] Device not connected, trying once before sending (16.1s after the wake)
+ERROR:ucapi_framework.device:[RM4 mini] Connection error: [Errno 101] Network is unreachable
+WARNING:rm:[RM4 mini] Cannot send command: device not connected (16.1s after the wake)
+ERROR:ucapi_framework.driver:[a0b1c2d3e4f5] Connection error: [Errno 101] Network is unreachable
+INFO:rm:[RM4 mini] Device not connected, trying once before sending (19.0s after the wake)
+ERROR:ucapi_framework.device:[RM4 mini] Connection error: [Errno 101] Network is unreachable
+WARNING:rm:[RM4 mini] Cannot send command: device not connected (19.1s after the wake)
+ERROR:ucapi_framework.driver:[a0b1c2d3e4f5] Connection error: [Errno 101] Network is unreachable
+DEBUG:rm:[RM4 mini] Device authenticated and ready
+WARNING:rm:[RM4 mini] Custom command failed, attempting reconnect: [Errno -4000] Network timeout: No response received within 4s
+ERROR:ucapi_framework.device:[RM4 mini] Connection error: [Errno -4000] Network timeout: No response received within 1.0s
+ERROR:ucapi_framework.driver:[a0b1c2d3e4f5] Connection error: [Errno -4000] Network timeout: No response received within 1.0s
+ERROR:ucapi_framework.device:[RM4 mini] Connection error: [Errno -4000] Network timeout: No response received within 1.0s
+WARNING:rm:[RM4 mini] Cannot send command: device not connected (42.7s after the wake)
+ERROR:ucapi_framework.driver:[a0b1c2d3e4f5] Connection error: [Errno -4000] Network timeout: No response received within 1.0s
+WARNING:rm:[RM4 mini] Failed to connect to stored IP 192.0.2.10: [Errno -4000] Network timeout: No response received within 3s. Trying discovery...
+ERROR:ucapi_framework.device:[RM4 mini] Connection error: [Errno 101] Network is unreachable
+ERROR:ucapi_framework.driver:[a0b1c2d3e4f5] Connection error: [Errno 101] Network is unreachable
+DEBUG:rm:[RM4 mini] Device authenticated and ready
+## tracebacks: 0

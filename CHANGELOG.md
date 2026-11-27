@@ -7,9 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## Unreleased
+## v1.3.0-madalone.5 - 2026-11-27
 
-Button presses made while the Remote's Wi-Fi is down are no longer sent late, and a new setting controls how long the press that wakes the Remote may wait for its Wi-Fi (BL-9). Details and evidence are in [BROADLINK-PATCHES.md](BROADLINK-PATCHES.md). "Configure" below is the integration's setup wizard: in the web configurator, Integrations → Broadlink → Start setup → Start integration setup, then the action (Update, Backup, Restore).
+Button presses made while the Remote's Wi-Fi is down are no longer sent late, and a new setting controls how long the press that wakes the Remote may wait for its Wi-Fi (BL-9). madalone.4 was a test build and was never released. Details and evidence are in [BROADLINK-PATCHES.md](BROADLINK-PATCHES.md). "Configure" below is the integration's setup wizard: in the web configurator, Integrations → Broadlink → Start setup → Start integration setup, then the action (Update, Backup, Restore).
 
 ### Fixed
 - **Presses made while the Remote's Wi-Fi is down are no longer sent late (BL-9).** The integration handles one press at a time. During a Wi-Fi outage each press waited for the network in turn, and the ones still waiting when it came back were all sent at once, seconds late; a late burst of power toggles can leave a TV off. Now a press waits for the Wi-Fi only in a short window right after the Remote wakes. At any other time it gets its error at once and is never sent later.
@@ -39,10 +39,12 @@ Button presses made while the Remote's Wi-Fi is down are no longer sent late, an
 - A button pressed during the second in which a Restore is being applied gets an error and is not sent.
 - If the Wi-Fi takes longer than the wake wait (4 seconds by default), the press that woke the Remote, and the presses made behind it, fail with an error. A longer "Wait for Wi-Fi after a wake" moves this edge, and so does the Remote's own "Retry commands after wakeup" set to 5 seconds or more, which resends the press after its error.
 
-### Tested on a Remote 3 so far
+### Tested before release
 - **Three days of normal use on the previous test build** (firmware 2.12.1), whose wake handling is the same: 54 wakes and 1,052 commands, all answered OK. 9 presses found the Broadlink still disconnected just after a wake; each reconnected within the wake wait and was sent.
+- **A day of normal use on this build** (2026-11-26/27, firmware 2.12.1): 26 wakes and 77 commands, all answered OK. Two presses found the Broadlink disconnected just after a wake; each reconnected at once and was sent. After the Remote updated itself to the 2.13.1 beta, the integration started and connected normally.
 - **The setup page on this build:** two Updates with the new list. The page appeared, 5 seconds was saved with the Remote PIN left empty, the Broadlink was listed once, and presses afterwards were sent.
-- Not run on the Remote yet: a Wi-Fi outage while the Remote is awake, and an unplugged Broadlink. The offline scenario tests cover both.
+- **Not run on the Remote: a Wi-Fi outage while the Remote is awake, and an unplugged Broadlink.** Both were run with this release's code (the test build installed on the Remote) against a simulated network and Broadlink. In the simulation, during a 15-second outage every press got an error at once and none was sent late. With the Broadlink unplugged, the first press got its error within about 5 seconds and the next after about 1 second, and none was sent after it was plugged back in. Presses afterwards worked in both.
+- **The setup pages** were accepted by the Remote's core of firmware 2.12.1 and of the 2.13.0 and 2.13.1 betas (UC's core simulator), along every setup path: Add, Update, Remove, Reset, Backup and Restore.
 
 ---
 
