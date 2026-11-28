@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## Unreleased
+## v1.3.0-madalone.6 - 2026-11-28
 
 A shortcut to the integration's settings (BL-11). Details and evidence are in [BROADLINK-PATCHES.md](BROADLINK-PATCHES.md).
 
@@ -21,8 +21,9 @@ A shortcut to the integration's settings (BL-11). Details and evidence are in [B
 ### Known limitations
 - A saved wait between whole seconds (from a hand-edited or restored configuration, e.g. 2.5) is shown as the nearest whole second, and Next saves that, as on Update's last page since BL-9.
 
-### Tested on a Remote 3 so far
+### Tested before release
 - **Test build madalone.6 (firmware 2.13.1 beta), 2026-11-27/28:** the first page opened on "Configure selected device"; Next saved 3 seconds and closed the setup 1.5 seconds later, with no search and no PIN; opened again, the page showed 3 seconds, and Cancel saved nothing. After the next wake, the first press (0.1 s after the wake) reconnected and was sent, and the presses after it too: 5 presses, all answered OK. No warning in the integration's log.
+- **Every setup path** (Configure, Add, Update, Remove, Reset, Backup and Restore) was accepted by the Remote's core of firmware 2.12.1 and of the 2.13.0 and 2.13.1 betas (UC's core simulator), with button presses working before and right after Configure.
 
 ---
 
