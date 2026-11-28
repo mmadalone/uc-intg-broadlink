@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## Unreleased
+
+A shortcut to the integration's settings (BL-11). Details and evidence are in [BROADLINK-PATCHES.md](BROADLINK-PATCHES.md).
+
+### Added
+- **"Configure selected device"** on the setup wizard's first page ("Configuration mode"; web configurator: Integrations → Broadlink → Start setup → Start integration setup). It opens one page with the Broadlink's settings, today "Wait for Wi-Fi after a wake", and Next saves it at once: no search for the Broadlink or the Remote, no PIN. The Broadlink uses the new value straight away, without a restart. UC's own Denon, Android TV and Apple TV integrations have the same action.
+
+### Changed
+- With a Broadlink configured, the first page now opens on "Configure selected device" instead of "Add a new device", as in UC's integrations. Its settings page saves nothing until you press its Next, and Cancel saves nothing.
+- "Configure selected device" changes settings only. "Update information for selected device" is still the way to find the Broadlink again (a new IP address) or to give the Remote's PIN again; the wait setting is on its last page too.
+
+### Known limitations
+- A saved wait between whole seconds (from a hand-edited or restored configuration, e.g. 2.5) is shown as the nearest whole second, and Next saves that, as on Update's last page since BL-9.
+
+### Tested on a Remote 3 so far
+- **Test build madalone.6 (firmware 2.13.1 beta), 2026-11-27/28:** the first page opened on "Configure selected device"; Next saved 3 seconds and closed the setup 1.5 seconds later, with no search and no PIN; opened again, the page showed 3 seconds, and Cancel saved nothing. After the next wake, the first press (0.1 s after the wake) reconnected and was sent, and the presses after it too: 5 presses, all answered OK. No warning in the integration's log.
+
+---
+
 ## v1.3.0-madalone.5 - 2026-11-27
 
 Button presses made while the Remote's Wi-Fi is down are no longer sent late, and a new setting controls how long the press that wakes the Remote may wait for its Wi-Fi (BL-9). madalone.4 was a test build and was never released. Details and evidence are in [BROADLINK-PATCHES.md](BROADLINK-PATCHES.md). "Configure" below is the integration's setup wizard: in the web configurator, Integrations → Broadlink → Start setup → Start integration setup, then the action (Update, Backup, Restore).

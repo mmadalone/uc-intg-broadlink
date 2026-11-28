@@ -5,6 +5,7 @@ Setup flow for Broadlink Remote integration.
 :license: Mozilla Public License Version 2.0, see LICENSE for more details.
 """
 
+import asyncio
 import logging
 import math
 from typing import Any
@@ -18,10 +19,13 @@ from ucapi import (
     IntegrationSetupError,
     RequestUserInput,
     SetupAction,
+    SetupComplete,
     SetupDriver,
     SetupError,
+    UserDataResponse,
 )
 from ucapi_framework import BaseSetupFlow
+from ucapi_framework.setup import SetupSteps
 from unfurled import AuthenticationError, Remote, discover_remotes
 
 _LOG = logging.getLogger(__name__)
@@ -45,6 +49,13 @@ WAIT_SETTINGS: dict[str, tuple[float, str, str]] = {
 WAIT_STEP_SEC = 1.0
 # BL-9: the PIN field's id; ucapi redacts "password" when it logs a message.
 PIN_FIELD = "password"
+# BL-11: the "Configuration mode" action that opens the settings page of the chosen
+# Broadlink and saves it in place, as in UC's own Denon, Android TV and Apple TV
+# integrations (same id and label).
+CONFIGURE_ACTION = {"id": "configure", "label": {"en": "Configure selected device"}}
+# BL-11: the framework pauses 1 s before answering an action (a workaround for the web
+# configurator missing a quick first answer) and before SetupComplete; so does this.
+CONFIGURE_PAUSE_SEC = 1.0
 
 
 def _wait_seconds(value: Any, fallback: float, maximum: float) -> float:
@@ -157,6 +168,9 @@ class BroadlinkSetupFlow(BaseSetupFlow[BroadlinkConfig]):
     # long as the driver runs, and a cancelled setup saves nothing, so the saved key
     # may still be the one the Remote no longer has.
     _key_may_be_gone: bool = False
+    # BL-11: the Broadlink whose settings page ("Configure selected device") is open,
+    # until its answer is handled or the setup session ends.
+    _configure_id: str | None = None
 
     async def handle_driver_setup(self, msg: SetupDriver) -> SetupAction:
         """Start each setup session afresh, then let the framework handle the message.
@@ -171,12 +185,145 @@ class BroadlinkSetupFlow(BaseSetupFlow[BroadlinkConfig]):
         when a new setup starts, and an Add after an Update that ended without an abort
         would then replace (delete) that Broadlink when it saves. The key guard is not
         reset here: it lasts until a key request succeeds.
+
+        BL-11: the framework has no hook for an extra action, so "Configure selected
+        device" and the answer to its page are handled here, before the framework sees
+        them (it would end the setup with "Invalid configuration action").
         """
         if isinstance(msg, (DriverSetupRequest, AbortDriverSetup)):
             self._pending_device_config = None
+            self._configure_id = None
         if isinstance(msg, DriverSetupRequest):
             self._selected_config_id = None
+        if isinstance(msg, UserDataResponse):
+            if self._configure_id is not None:
+                return await self._save_configure(msg)
+            if (
+                self._pending_device_config is None
+                and self._setup_step == SetupSteps.CONFIGURATION_MODE
+                and "action" in msg.input_values
+                and msg.input_values["action"] == CONFIGURE_ACTION["id"]
+            ):
+                return await self._start_configure(msg.input_values.get("choice"))
         return await super().handle_driver_setup(msg)
+
+    async def _build_configuration_mode_screen(self) -> RequestUserInput:
+        """Add "Configure selected device" to the framework's first page (BL-11).
+
+        The action goes right after "Add a new device" and is selected when a
+        Broadlink is configured, as in UC's own integrations. The framework builds the
+        page in a private method with no hook for actions: if its page is not the
+        expected shape, it is sent unchanged, so a framework change loses only this
+        shortcut.
+        """
+        page = await super()._build_configuration_mode_screen()
+        if not any(True for _ in self.config.all()):
+            return page
+        for setting in page.settings:
+            if setting.get("id") != "action":
+                continue
+            dropdown = setting.get("field", {}).get("dropdown")
+            items = dropdown.get("items") if isinstance(dropdown, dict) else None
+            if (
+                not isinstance(items, list)
+                or not items
+                or not all(isinstance(item, dict) for item in items)
+            ):
+                break
+            if all(item.get("id") != CONFIGURE_ACTION["id"] for item in items):
+                items.insert(1, dict(CONFIGURE_ACTION))
+            dropdown["value"] = CONFIGURE_ACTION["id"]
+            return page
+        _LOG.warning(
+            "The setup's first page has no action list: "
+            '"Configure selected device" is not offered'
+        )
+        return page
+
+    async def _start_configure(self, choice: Any) -> SetupAction:
+        """Show the settings page of the chosen Broadlink (BL-11)."""
+        try:
+            stored = self.config.get(choice) if isinstance(choice, str) else None
+            if stored is None:
+                _LOG.warning("Could not configure device: %s", choice)
+                return SetupError(error_type=IntegrationSetupError.OTHER)
+            await asyncio.sleep(CONFIGURE_PAUSE_SEC)
+            self._configure_id = choice
+            return RequestUserInput(
+                {"en": f"Configure {stored.name}"}, _wait_fields(stored)
+            )
+        except Exception as err:  # pylint: disable=broad-except
+            self._configure_id = None
+            _LOG.error("Cannot show the device settings: %s", err)
+            return SetupError(error_type=IntegrationSetupError.OTHER)
+
+    async def _save_configure(self, msg: UserDataResponse) -> SetupAction:
+        """Save the settings page's answer in place and end the setup (BL-11).
+
+        Only the page's fields are set, on the saved configuration and on the running
+        device's own configuration when that is another object: after the Remote
+        unsubscribes the Broadlink's entities and subscribes them again, the framework
+        re-creates the device from a copy (``get_device_config`` falls back to
+        ``config.get``). Without that, the new value would not reach the running
+        device, and its next own update (a changed IP address writes every field of its
+        configuration) would put the old value back in the file. No device is
+        re-created: the device reads the setting each time it needs it.
+        """
+        device_id = self._configure_id
+        try:
+            stored = next(
+                (
+                    item
+                    for item in self.config.all()
+                    if self.get_device_id(item) == device_id
+                ),
+                None,
+            )
+            if stored is None:
+                _LOG.warning("Could not configure device: %s", device_id)
+                return SetupError(error_type=IntegrationSetupError.OTHER)
+            running = self.driver.get_device_config(device_id)
+            values = {}
+            for key, (maximum, _title, _help) in WAIT_SETTINGS.items():
+                fallback = _wait_seconds(
+                    getattr(stored, key, getattr(BroadlinkConfig, key)),
+                    getattr(BroadlinkConfig, key),
+                    maximum,
+                )
+                values[key] = _wait_seconds(
+                    msg.input_values.get(key), fallback, maximum
+                )
+            targets = [stored]
+            if running is not None and running is not stored:
+                targets.append(running)
+            old = [{key: getattr(target, key) for key in values} for target in targets]
+            for target in targets:
+                for key, value in values.items():
+                    setattr(target, key, value)
+            if not self.config.store():
+                # Put the old values back: the user is told the save failed, so the
+                # device must not use the new value, and the next write from anywhere
+                # (an Update, the device's own IP-change update) must not save it.
+                for target, before in zip(targets, old):
+                    for key, value in before.items():
+                        setattr(target, key, value)
+                return SetupError(error_type=IntegrationSetupError.OTHER)
+            _LOG.info(
+                "Saved for %s: %s",
+                stored.name,
+                ", ".join(
+                    f"{WAIT_SETTINGS[key][1][:1].lower()}{WAIT_SETTINGS[key][1][1:]} "
+                    f"{value:g} s"
+                    for key, value in values.items()
+                ),
+            )
+            await asyncio.sleep(CONFIGURE_PAUSE_SEC)
+            return SetupComplete()
+        except Exception as err:  # pylint: disable=broad-except
+            _LOG.error("Cannot save the device settings: %s", err)
+            return SetupError(error_type=IntegrationSetupError.OTHER)
+        finally:
+            self._configure_id = None
 
     def get_manual_entry_form(self) -> RequestUserInput:
         """

@@ -87,7 +87,10 @@ stand-in driver set up, with a configuration file written for the path):
   core answers, and whether the driver ever sees them;
 - P10: Update, Cancel on the last page, Update again, in one driver process: the
   Broadlink is listed once on "Discovered Devices" (discover.py used to add to a list
-  it never cleared); then the Broadlink at a new address: listed once, and saved there.
+  it never cleared); then the Broadlink at a new address: listed once, and saved there;
+- P11 (BL-11): "Configure selected device": the first page opens on it, its settings
+  page saves the wait in place with no search and no key request, presses work before
+  and right after it, and Update and Configure each show what the other saved.
 
 Usage, from the repository root, with <out> an empty folder outside the repository and
 <image> the test image (Python 3.11 with requirements.txt installed). One path, P2:
@@ -104,7 +107,7 @@ Usage, from the repository root, with <out> an empty folder outside the reposito
 the folders as Windows paths: "$(pwd -W)", "$(cygpath -w <out>)".) The first argument,
 /w here, is the tree to test: a folder with driver.json and intg-broadlink/; the test
 file may come from another folder. No port is published and the simulator has no
-network; the client shares its loopback. Run every path, P0 to P10, each with a new
+network; the client shares its loopback. Run every path, P0 to P11, each with a new
 simulator, on the core of the firmware the Remote runs and on the newest one, and
 again for each new firmware: the page rules are the core's, and it can change them.
 
@@ -2100,6 +2103,94 @@ def p10(run: Run) -> None:
     run.end("Done")
 
 
+def p11(run: Run) -> None:
+    """P11: BL-11's "Configure selected device": a press, Configure, a press, Update.
+
+    The first page opens on Configure; Next as it is opens the settings page; 5 s saves
+    in place with no device search, Remote search or key request; a press right after
+    works; Update still shows and saves the setting; Configure shows what Update saved,
+    and its Cancel saves nothing.
+    """
+    run.seed([entry()])
+    emitter = run.configure_entities()
+    before = run.press(emitter, "before Configure")
+    run.check("a press before Configure is answered 200 and sent", before.works)
+    page = run.need_page(run.begin(True, "the wizard opened"), "Configuration mode")
+    actions = [item_id for item_id, _label in items_of(page, "action")]
+    _kind, spec = field_of(page, "action")
+    run.check(
+        f"page {len(run.pages)}: the actions, Configure second and selected",
+        actions
+        == ["add", "configure", "update", "remove", "reset", "backup", "restore"]
+        and spec.get("value") == "configure",
+        f"{actions}, selected {spec.get('value')!r}",
+    )
+    mark = run.mark()
+    answer = fill(page, choice=MAC)
+    outcome = run.answer(answer, "Next with the action as shown")
+    run.check_answer(outcome.mark, **answer)
+    page = run.need_page(outcome, f"Configure {NAME}")
+    items = [item_id for item_id, _label in items_of(page, WAIT_FIELD)]
+    _kind, spec = field_of(page, WAIT_FIELD)
+    run.check(
+        f"page {len(run.pages)}: the wait list 0-6 s, the saved 4 s selected",
+        items == [str(n) for n in range(7)] and spec.get("value") == "4",
+        f"{items}, selected {spec.get('value')!r}",
+    )
+    answer = fill(page, wake_wait_sec="5")
+    outcome = run.answer(answer, "5 seconds")
+    run.need_end(outcome, "Configure, 5 seconds")
+    run.check_answer(outcome.mark, **answer)
+    searches = [
+        record["edge"]
+        for edge in (
+            "broadlink.discover",
+            "broadlink.hello",
+            "unfurled.discover_remotes",
+            "unfurled.generate_key",
+        )
+        for record in run.edges(edge, mark)
+    ]
+    run.check(
+        "no device search, Remote search or key request", not searches, f"{searches}"
+    )
+    run.check_saved(
+        address=IP,
+        remote_api_key=SAVED_KEY,
+        remote_address=REMOTE_URL,
+        data=CODES,
+        wake_wait_sec=5.0,
+    )
+    saved_line = run.logged(f"Saved for {NAME}: wait for Wi-Fi after a wake 5 s")
+    run.check("the driver logged the save once", len(saved_line) == 1, f"{saved_line}")
+    run.end("Done")
+    after = run.press(emitter, "right after Configure")
+    run.check("a press right after Configure is answered 200 and sent", after.works)
+    page = run.to_last_page()
+    run.check_last_page(page, "5", KEEP_LABEL)
+    run.need_end(
+        run.answer(fill(page, wake_wait_sec="3"), "Update, the PIN left empty, 3 s"),
+        "Update after Configure",
+    )
+    run.check_saved(
+        "Update after Configure", remote_api_key=SAVED_KEY, wake_wait_sec=3.0
+    )
+    run.end("Done")
+    page = run.need_page(run.begin(True, "the wizard opened"), "Configuration mode")
+    page = run.need_page(
+        run.answer(fill(page, choice=MAC), "Next with the action as shown"),
+        f"Configure {NAME}",
+    )
+    _kind, spec = field_of(page, WAIT_FIELD)
+    run.check(
+        f"page {len(run.pages)}: Configure shows what Update saved, 3 s",
+        spec.get("value") == "3",
+        f"selected {spec.get('value')!r}",
+    )
+    run.end("Cancel")
+    run.check_saved("after Configure's Cancel", data=CODES, wake_wait_sec=3.0)
+
+
 PATHS = {
     "P0": p0,
     "P1": p1,
@@ -2112,6 +2203,7 @@ PATHS = {
     "P8": p8,
     "P9": p9,
     "P10": p10,
+    "P11": p11,
 }
 
 

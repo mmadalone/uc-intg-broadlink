@@ -242,6 +242,7 @@ from ucapi import (  # noqa: E402
     SetupComplete,
     SetupError,
     StatusCodes,
+    UserDataResponse,
 )
 from ucapi_framework import create_entity_id  # noqa: E402
 
@@ -476,6 +477,21 @@ framework_setup.asyncio = NoPauseAsyncio()
 ucapi_api.asyncio = NoPauseAsyncio()
 
 
+class RecordedPauses(NoPauseAsyncio):
+    """``asyncio`` without its pauses for setup.py, which records each one (BL-11)."""
+
+    pauses: list[float] = []
+
+    async def sleep(self, delay, result=None):  # pylint: disable=invalid-overridden-method
+        """Record the pause, then yield to the loop once."""
+        self.pauses.append(delay)
+        return await asyncio.sleep(0, result)
+
+
+SETUP_ASYNCIO = RecordedPauses()
+broadlink_setup.asyncio = SETUP_ASYNCIO
+
+
 class FakeDriver:
     """What ucapi-framework's setup flow uses of the integration driver."""
 
@@ -484,6 +500,10 @@ class FakeDriver:
         self.config_manager = config_manager
         self._device_class = None
         self._pending_setup_task = None
+
+    def get_device_config(self, device_id: str):
+        """Return a copy of the saved configuration, as the framework does with no device."""
+        return self.config_manager.get(device_id)
 
 
 class DriverCreated(Exception):
@@ -3452,6 +3472,370 @@ async def case_r_resubscribe():
             await stop_driver(driver, before)
 
 
+def setup_flow_of(flow):
+    """Return the setup flow object the framework's handler made (on its first message)."""
+    return inspect.getclosurevars(flow.handler).nonlocals.get("setup_flow")
+
+
+def actions(page) -> tuple[list[str], str | None]:
+    """Return the "Configuration mode" page's action ids and the one selected."""
+    for setting in getattr(page, "settings", None) or []:
+        if setting.get("id") == "action":
+            dropdown = setting["field"]["dropdown"]
+            return [item["id"] for item in dropdown["items"]], dropdown.get("value")
+    return [], None
+
+
+def is_configure_page(page) -> bool:
+    """Return whether ``page`` is BL-11's settings page: its title, the wait list, its help."""
+    return (
+        isinstance(page, RequestUserInput)
+        and page_name(page) == "Configure RM4 mini"
+        and [s["id"] for s in page.settings] == ["wake_wait_sec", "wake_wait_sec_help"]
+        and wait_list(page) is not None
+    )
+
+
+def unchanged_but_wait(saved: BroadlinkConfig | None, address: str = IP) -> bool:
+    """Return whether everything but the wait is still as ``saved_entry`` saved it."""
+    return (
+        saved is not None
+        and saved.address == address
+        and saved.data == CODES
+        and saved.remote_address == ADDRESS_A
+        and saved.remote_api_key == OLD_KEY
+        and saved.name == "RM4 mini"
+    )
+
+
+async def configure(flow, wait: str | None):
+    """Open "Configure selected device" for the Broadlink; answer ``wait`` unless None.
+
+    Return (the first page, the settings page, the answer to it or None).
+    """
+    first = await flow.send()
+    page = await flow.send({"choice": MAC, "action": "configure"})
+    if wait is None:
+        return first, page, None
+    return first, page, await flow.send({"wake_wait_sec": wait})
+
+
+async def case_x():
+    """Check X: BL-11's "Configure selected device" on the first page.
+
+    The action opens the chosen Broadlink's settings page (the wait list only) and
+    saves it in place: no device search, no Remote search, no key request, nothing
+    else changed, and the running device uses the new value at once, also when the
+    framework re-created it from a copy of its configuration (after the Remote
+    unsubscribed from and subscribed to its entities again).
+    """
+    # X1 the action list, with a Broadlink configured and with none
+    flow = Flow(saved=[saved_entry(wake_wait_sec=4.0)])
+    with_device = actions(await flow.send())
+    empty = Flow(saved=[])
+    without = actions(await empty.send())
+    report(
+        "X1 the first page with a Broadlink configured lists Configure selected device "
+        "second, selected; with none configured the list is the framework's own, on Add",
+        f"configured: {with_device}; none: {without}",
+        with_device
+        == (
+            ["add", "configure", "update", "remove", "reset", "backup", "restore"],
+            "configure",
+        )
+        and without == (["add", "restore"], "add"),
+    )
+
+    # X2 Configure -> 5 s: saved in place, nothing else, no searches, both pauses
+    calls = Counter()
+    real_remotes, real_xdiscover = broadlink_setup.discover_remotes, broadlink.xdiscover
+    real_discover = broadlink.discover
+
+    async def counted_remotes(*args, **kwargs):
+        calls["remotes"] += 1
+        return await real_remotes(*args, **kwargs)
+
+    def counted_xdiscover(*args, **kwargs):
+        calls["broadlink at an address"] += 1
+        return real_xdiscover(*args, **kwargs)
+
+    def counted_discover(*args, **kwargs):
+        calls["broadlink search"] += 1
+        return real_discover(*args, **kwargs)
+
+    broadlink_setup.discover_remotes = counted_remotes
+    broadlink.xdiscover = counted_xdiscover
+    broadlink.discover = counted_discover
+    try:
+        flow = Flow(saved=[saved_entry(wake_wait_sec=4.0)])
+        SETUP_ASYNCIO.pauses.clear()
+        start = len(LOGS.entries)
+        _, page, done = await configure(flow, "5")
+        pauses = list(SETUP_ASYNCIO.pauses)
+        saved = flow.saved()
+        lines = [t for t in LOGS.texts(start) if "Saved for" in t]
+    finally:
+        broadlink_setup.discover_remotes = real_remotes
+        broadlink.xdiscover = real_xdiscover
+        broadlink.discover = real_discover
+    report(
+        "X2 Configure, 5 s: the settings page shows the saved 4 s; the answer ends the "
+        "setup and saves 5 s in place, everything else as it was; no device search, no "
+        "Remote search, no key request; a 1 s pause before the page and before the end, "
+        "as the framework makes; one log line",
+        f"page {page_name(page)!r}, shown {wait_shown(page)!r}; answer "
+        f"{type(done).__name__}; saved: {describe(saved)}; searches {dict(calls)}, key "
+        f"requests {len(KEY_REQUESTS)}; pauses {pauses}; log {lines}",
+        is_configure_page(page)
+        and wait_shown(page) == "4"
+        and isinstance(done, SetupComplete)
+        and saved is not None
+        and is_seconds(saved.wake_wait_sec, 5.0)
+        and unchanged_but_wait(saved)
+        and not calls
+        and not KEY_REQUESTS
+        and pauses == [1.0, 1.0]
+        and lines == ["INFO setup: Saved for RM4 mini: wait for Wi-Fi after a wake 5 s"],
+    )
+
+    # X3 a value saved between whole seconds is shown rounded; Next untouched saves that
+    flow = Flow(saved=[saved_entry(wake_wait_sec=2.5)])
+    _, page, _ = await configure(flow, None)
+    shown = untouched(flow.waiting, "wake_wait_sec")
+    done = await flow.send({"wake_wait_sec": shown})
+    saved = flow.saved()
+    report(
+        "X3 a saved 2.5 s (a hand-edited or restored file): the page shows 3 s, and "
+        "Next without touching the list saves 3 s",
+        f"shown {shown!r}; answer {type(done).__name__}; saved {describe(saved)}",
+        shown == "3"
+        and isinstance(done, SetupComplete)
+        and saved is not None
+        and is_seconds(saved.wake_wait_sec, 3.0),
+    )
+
+    # X4 the lowest item, and an answer that only another client could send (the
+    # Remote's core refuses an answer that is no item of the list or leaves it out; S
+    # checks the list's items against the core's model)
+    flow = Flow(saved=[saved_entry(wake_wait_sec=4.0)])
+    await configure(flow, None)
+    done = await flow.send({"wake_wait_sec": "0"})
+    first_saved = flow.saved()
+    flow = Flow(saved=[saved_entry(wake_wait_sec=2.0)])  # not the default (4 s)
+    await configure(flow, None)
+    direct = await setup_flow_of(flow).handle_driver_setup(UserDataResponse({}))
+    kept = flow.saved()
+    report(
+        "X4 0 s (no wait) is saved as 0 s; an answer without the wait (no core sends it) "
+        "keeps the saved 2 s, not the default 4 s",
+        f"0: {type(done).__name__}, saved {describe(first_saved)}; no wait: "
+        f"{type(direct).__name__}, saved {describe(kept)}",
+        isinstance(done, SetupComplete)
+        and is_seconds(first_saved.wake_wait_sec, 0.0)
+        and isinstance(direct, SetupComplete)
+        and is_seconds(kept.wake_wait_sec, 2.0),
+    )
+
+    # X5 an unknown Broadlink, one removed between the two pages, a write that fails
+    flow = Flow(saved=[saved_entry(wake_wait_sec=4.0)])
+    await flow.send()
+    unknown = await setup_flow_of(flow).handle_driver_setup(
+        UserDataResponse({"choice": "ffffffffffff", "action": "configure"})
+    )
+    flow = Flow(saved=[saved_entry(wake_wait_sec=4.0)])
+    await configure(flow, None)
+    flow.manager.remove(MAC)
+    gone = await flow.send({"wake_wait_sec": "5"})
+    removed = flow.saved()
+    cleared = setup_flow_of(flow)._configure_id is None
+    flow = Flow(saved=[saved_entry(wake_wait_sec=4.0)])
+    await configure(flow, None)
+    before_text = flow.file_text()
+    real_path = flow.manager._cfg_file_path
+    flow.manager._cfg_file_path = flow.folder  # a folder: the write fails (OSError)
+    start = len(LOGS.entries)
+    try:
+        failed = await flow.send({"wake_wait_sec": "5"})
+    finally:
+        flow.manager._cfg_file_path = real_path
+    failed_lines = [t for t in LOGS.texts(start) if "Saved for" in t]
+    in_memory = next(iter(flow.manager.all())).wake_wait_sec
+    cleared = cleared and setup_flow_of(flow)._configure_id is None
+    report(
+        "X5 an unknown Broadlink: an error; the Broadlink removed before the answer: an "
+        "error, nothing written back; the configuration file can't be written: an error, "
+        "no Saved line, the file as it was and the old value back in memory (the device "
+        "must not use, and a later write must not save, a value the user saw fail); the "
+        "settings page's flag cleared after each error",
+        f"unknown {type(unknown).__name__}; removed {type(gone).__name__}, then "
+        f"{describe(removed)}; write fails {type(failed).__name__}, Saved lines "
+        f"{failed_lines}, file unchanged {flow.file_text() == before_text}, in memory "
+        f"{in_memory!r}; flag cleared {cleared}",
+        isinstance(unknown, SetupError)
+        and isinstance(gone, SetupError)
+        and removed is None
+        and isinstance(failed, SetupError)
+        and not failed_lines
+        and flow.file_text() == before_text
+        and in_memory == 4.0
+        and cleared,
+    )
+
+    # X6 a setup that ends on the settings page leaves nothing behind
+    flow = Flow(saved=[saved_entry(wake_wait_sec=4.0)])
+    await configure(flow, None)
+    await flow.abort()
+    stray = await setup_flow_of(flow).handle_driver_setup(
+        UserDataResponse({"wake_wait_sec": "5"})
+    )
+    stray_saved = flow.saved()
+    after_cancel = await flow.send()
+    update_page = await flow.send({"choice": MAC, "action": "update"})
+    flow = Flow(saved=[saved_entry(wake_wait_sec=4.0)])
+    await configure(flow, None)
+    restarted = await flow.send()  # no abort: the next setup just starts
+    update_again = await flow.send({"choice": MAC, "action": "update"})
+    report(
+        "X6 the settings page left with Cancel: an answer after it is not saved; the next "
+        "setup's first page is Configuration mode and its Update goes on to the device "
+        "search (not to the settings page's handler); the same when the page is left "
+        "open and a new setup starts",
+        f"after Cancel: a stray answer {type(stray).__name__}, saved "
+        f"{describe(stray_saved)}; then {page_name(after_cancel)!r}, "
+        f"{page_name(update_page)!r}; after a new setup: {page_name(restarted)!r}, then "
+        f"{page_name(update_again)!r}",
+        not isinstance(stray, SetupComplete)
+        and is_seconds(stray_saved.wake_wait_sec, 4.0)
+        and is_configuration_mode(after_cancel)
+        and is_broadlink_page(update_page)
+        and is_configuration_mode(restarted)
+        and is_broadlink_page(update_again),
+    )
+
+    # X7 an exception inside the new handlers ends that setup with an error only
+    real_fields = broadlink_setup._wait_fields
+
+    def broken_fields(_device):
+        raise RuntimeError("X7 test")
+
+    flow = Flow(saved=[saved_entry(wake_wait_sec=4.0)])
+    broadlink_setup._wait_fields = broken_fields
+    try:
+        await flow.send()
+        raised_page = await flow.send({"choice": MAC, "action": "configure"})
+    finally:
+        broadlink_setup._wait_fields = real_fields
+    real_seconds = broadlink_setup._wait_seconds
+    _, _, _ = await configure(flow, None)
+    broadlink_setup._wait_seconds = lambda *_args: (_ for _ in ()).throw(
+        RuntimeError("X7 test")
+    )
+    try:
+        raised_save = await flow.send({"wake_wait_sec": "5"})
+    finally:
+        broadlink_setup._wait_seconds = real_seconds
+    _, page, done = await configure(flow, "6")
+    report(
+        "X7 an exception while making the settings page, or while saving it: that setup "
+        "ends with an error; the next Configure works",
+        f"page {type(raised_page).__name__}; save {type(raised_save).__name__}; then "
+        f"{page_name(page)!r}, {type(done).__name__}, saved {describe(flow.saved())}",
+        isinstance(raised_page, SetupError)
+        and isinstance(raised_save, SetupError)
+        and is_configure_page(page)
+        and isinstance(done, SetupComplete)
+        and is_seconds(flow.saved().wake_wait_sec, 6.0),
+    )
+
+    # X8 the framework's page as BL-11 expects it, and a page of another shape
+    flow = Flow(saved=[saved_entry(wake_wait_sec=4.0)])
+    await flow.send()
+    own = await framework_setup.BaseSetupFlow._build_configuration_mode_screen(
+        setup_flow_of(flow)
+    )
+    real_build = framework_setup.BaseSetupFlow._build_configuration_mode_screen
+
+    async def other_shape(_self):
+        return RequestUserInput({"en": "Configuration mode"}, [])
+
+    framework_setup.BaseSetupFlow._build_configuration_mode_screen = other_shape
+    start = len(LOGS.entries)
+    try:
+        other = await setup_flow_of(flow)._build_configuration_mode_screen()
+    finally:
+        framework_setup.BaseSetupFlow._build_configuration_mode_screen = real_build
+    warned = [t for t in LOGS.texts(start) if "no action list" in t]
+    report(
+        "X8 ucapi-framework as BL-11 relies on it: a CONFIGURATION_MODE step and an "
+        "action list on its first page without Configure; a first page of another shape "
+        "is sent unchanged, with a warning (else: ucapi-framework changed, re-check BL-11)",
+        f"step {getattr(framework_setup.SetupSteps, 'CONFIGURATION_MODE', None)}; the "
+        f"framework's actions {actions(own)}; another shape: {other.settings}, "
+        f"warnings {len(warned)}",
+        hasattr(framework_setup.SetupSteps, "CONFIGURATION_MODE")
+        and actions(own) == (
+            ["add", "update", "remove", "reset", "backup", "restore"],
+            "add",
+        )
+        and other.settings == []
+        and len(warned) == 1,
+    )
+
+    # X9-X10 the running device uses the new value at once, also when it holds a copy
+    harness = bl8_harness()
+    before = asyncio.all_tasks()
+    with bl8_fakes(harness):
+        harness.NET = harness.Net(up_at=0.0)
+        flow = Flow(saved=[saved_entry(wake_wait_sec=4.0)], make_driver=real_driver)
+        driver = flow.driver
+        try:
+            await start_driver(driver)
+            device = driver._device_instances.get(MAC)
+            shared = device is not None and device.device_config is next(
+                iter(driver.config_manager.all())
+            )
+            _, page, done = await configure(flow, "5")
+            same = driver._device_instances.get(MAC) is device
+            live = device._wake_wait() if device is not None else None
+            report(
+                "X9 the driver running, its device sharing the saved configuration: "
+                "Configure 5 s, and the same device (not re-created) uses 5 s at once",
+                f"shared {shared}; answer {type(done).__name__}; same device {same}; "
+                f"its wait {live}",
+                shared and isinstance(done, SetupComplete) and same and live == 5.0,
+            )
+
+            await remote_request(flow, "subscribe_events", [EMITTER])
+            await remote_request(flow, "unsubscribe_events", [EMITTER])
+            await remote_request(flow, "subscribe_events", [EMITTER])
+            copy = driver._device_instances.get(MAC)
+            holds_copy = copy is not None and copy is not device and (
+                copy.device_config is not next(iter(driver.config_manager.all()))
+            )
+            _, page, done = await configure(flow, "2")
+            live = copy._wake_wait() if copy is not None else None
+            if copy is not None:
+                copy.update_config(address=NEW_IP)  # what the device does on an IP change
+            saved = flow.saved()
+            report(
+                "X10 the Remote unsubscribes and subscribes again (the framework "
+                "re-creates the device from a copy of its configuration): Configure 2 s, "
+                "and that device uses 2 s at once; its own update after an IP change "
+                "then keeps 2 s in the file, with the new address and the learned codes",
+                f"a new device holding a copy {holds_copy}; answer "
+                f"{type(done).__name__}; its wait {live}; after its update: "
+                f"{describe(saved)}",
+                holds_copy
+                and isinstance(done, SetupComplete)
+                and live == 2.0
+                and saved is not None
+                and is_seconds(saved.wake_wait_sec, 2.0)
+                and unchanged_but_wait(saved, address=NEW_IP),
+            )
+        finally:
+            await stop_driver(driver, before)
+
+
 def is_discovered_page(page) -> bool:
     """Return whether ``page`` is the framework's "Discovered Devices" page."""
     return isinstance(page, RequestUserInput) and page.title == {
@@ -4140,6 +4524,7 @@ async def main():
             case_r_standby,
             case_r_resubscribe,
             case_v,
+            case_x,
             case_s,  # after every case that sends a page: it checks them all
             case_p,  # last: it checks what the others logged
         ):
